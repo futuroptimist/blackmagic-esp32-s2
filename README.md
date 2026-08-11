@@ -36,7 +36,7 @@ idf.py -p <port> flash
 
 Web interface is located in `components/svelte-portal` and written in Svelte. To build it, you need to install Node.js and run `npm install` in `components/svelte-portal` directory. Then you can run `npm run dev` to start development server or `npm run build` to build production version.
 
-Typical workflow is to fix the board's IP address in `components/svelte-portal/src/lib/Api.svelte` and then run `npm run dev`. After that, you can open `http://localhost:5000` in your browser and see changes in the web interface in real time with live reload.
+Typical workflow is to fix the board's IP address in `components/svelte-portal/src/lib/Api.svelte` and then run `npm run dev`. After that, `http://localhost:5000/` serves the landing page, while `http://localhost:5000/config.html` opens the Svelte configuration UI with live reload.
 
 If you want to change local ip or port, you need to run `export HOST={ip} PORT={port}` before `npm run dev`. 
 
@@ -45,7 +45,7 @@ export HOST=127.0.0.1 PORT=3000
 npm run dev
 ```
 
-When you're done, you need to run `npm run build`, `idf.py build` and then `idf.py -p <port> flash`. You can then open `http://blackmagic.local` in your browser and see the changes in the web interface.
+When you're done, you need to run `npm run build`, `idf.py build` and then `idf.py -p <port> flash`. After flashing, `/` serves the landing page and `/config` opens the configuration UI using the configured hostname; for example, the default hostname opens the configuration UI at `http://blackmagic.local/config`.
 ```shell
 npm run build
 idf.py build

@@ -106,6 +106,24 @@ const HttpResource http_resources[] = {
         .addr_end = index_html_end,
     },
     {
+        .uri = "/config",
+        .type = "text/html",
+        .addr_start = config_html_start,
+        .addr_end = config_html_end,
+    },
+    {
+        .uri = "/config/",
+        .type = "text/html",
+        .addr_start = config_html_start,
+        .addr_end = config_html_end,
+    },
+    {
+        .uri = "/config.html",
+        .type = "text/html",
+        .addr_start = config_html_start,
+        .addr_end = config_html_end,
+    },
+    {
         .uri = "/build/bundle.css",
         .type = "text/css",
         .addr_start = build_bundle_css_start,
