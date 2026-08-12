@@ -3,6 +3,7 @@ name: 'Build'
 on:
   push:
     branches:
+      - personal
       - dev
     tags:
       - '*'
@@ -64,12 +65,28 @@ jobs:
         working-directory: components/svelte-portal
 
       - name: 'Build firmware'
-        uses: Intake-Health/esp-idf-ci-action@release-v4.4
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v4.4.8
+          target: esp32s2
+          extra_docker_args: >-
+            -e COMMIT_MSG
+            -e COMMIT_HASH
+            -e COMMIT_SHA
+            -e SUFFIX
+            -e BRANCH_NAME
+            -e DIST_SUFFIX
+            -e WORKFLOW_BRANCH_OR_TAG
+            -e PULL_ID
+            -e PULL_NAME
 
       - name: 'Fix ownership'
         uses: peter-murray/reset-workspace-ownership-action@v1
         with:
           user_id: ${{ steps.uid.outputs.id }}
+
+      - name: 'Check canonical sdkconfig for drift'
+        run: git diff --exit-code -- sdkconfig
 
       - name: 'Make artifacts directory'
         if: ${{ !github.event.pull_request.head.repo.fork }}
