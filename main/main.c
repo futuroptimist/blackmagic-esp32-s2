@@ -19,6 +19,10 @@
 #include <gdb-glue.h>
 #include <soft-uart-log.h>
 
+#if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER
+#include <wolfssh_spike.h>
+#endif
+
 static const char* TAG = "main";
 
 void gdb_application_thread(void* pvParameters) {
@@ -66,6 +70,10 @@ void app_main(void) {
     network_http_server_init();
     network_gdb_server_init();
     network_uart_server_init();
+
+#if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER
+    wolfssh_spike_start(network_get_ip);
+#endif
 
     usb_init();
     cli_uart_init();
