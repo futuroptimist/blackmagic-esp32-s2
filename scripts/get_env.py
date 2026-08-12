@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import ssl
 import json
 import os
 import shlex
@@ -9,7 +8,7 @@ import string
 import random
 import argparse
 import datetime
-import urllib.request
+import subprocess
 
 
 def id_gen(size=5, chars=string.ascii_uppercase + string.digits):
@@ -29,23 +28,19 @@ def parse_args():
     return args
 
 
-def get_commit_json(event):
-    context = ssl._create_unverified_context()
-    commit_url = event["pull_request"]["base"]["repo"]["commits_url"].replace(
-        "{/sha}", f"/{event['pull_request']['head']['sha']}"
-    )
-    with urllib.request.urlopen(commit_url, context=context) as commit_file:
-        commit_json = json.loads(commit_file.read().decode("utf-8"))
-    return commit_json
-
-
 def get_details(event, args):
     data = {}
     current_time = datetime.datetime.utcnow().date()
     if args.type == "pull":
-        commit_json = get_commit_json(event)
-        data["commit_comment"] = shlex.quote(commit_json["commit"]["message"])
-        data["commit_hash"] = commit_json["sha"]
+        head_sha = event["pull_request"]["head"]["sha"]
+        commit_message = subprocess.run(
+            ["git", "show", "-s", "--format=%B", head_sha],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.rstrip("\r\n")
+        data["commit_comment"] = shlex.quote(commit_message)
+        data["commit_hash"] = head_sha
         ref = event["pull_request"]["head"]["ref"]
         data["pull_id"] = event["pull_request"]["number"]
         data["pull_name"] = shlex.quote(event["pull_request"]["title"])
