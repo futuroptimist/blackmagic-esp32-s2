@@ -362,10 +362,10 @@ static esp_err_t wifi_get_credentials_handler(httpd_req_t* req) {
     nvs_config_get_hostname(hostname);
 
     cJSON_AddStringToObject(root, "ap_ssid", mstring_get_cstr(ap_ssid));
-    cJSON_AddStringToObject(root, "ap_pass", mstring_get_cstr(ap_pass));
     cJSON_AddStringToObject(root, "sta_ssid", mstring_get_cstr(sta_ssid));
-    cJSON_AddStringToObject(root, "sta_pass", mstring_get_cstr(sta_pass));
     cJSON_AddStringToObject(root, "hostname", mstring_get_cstr(hostname));
+    cJSON_AddBoolToObject(root, "ap_pass_configured", mstring_size(ap_pass) > 0);
+    cJSON_AddBoolToObject(root, "sta_pass_configured", mstring_size(sta_pass) > 0);
 
     switch(wifi_mode) {
     case WiFiModeAP:
@@ -405,24 +405,25 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
 
     int total_length = req->content_len;
     int cur_len = 0;
-    char* buffer = malloc(256);
-    mstring_t* ap_ssid = mstring_alloc();
-    mstring_t* ap_pass = mstring_alloc();
-    mstring_t* sta_ssid = mstring_alloc();
-    mstring_t* sta_pass = mstring_alloc();
-    mstring_t* wifi_mode = mstring_alloc();
-    mstring_t* usb_mode = mstring_alloc();
-    mstring_t* hostname = mstring_alloc();
+    char* buffer = NULL;
+    cJSON* root = NULL;
+    mstring_t* value = NULL;
     const char* error_text = JSON_ERROR("unknown error");
     int received = 0;
 
-    if(total_length >= 256) {
+    if(total_length <= 0 || total_length >= 256) {
         error_text = JSON_ERROR("request too long");
         goto err_fail;
     }
 
+    buffer = malloc(total_length + 1);
+    if(buffer == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, JSON_ERROR("out of memory"));
+        return ESP_FAIL;
+    }
+
     while(cur_len < total_length) {
-        received = httpd_req_recv(req, buffer + cur_len, total_length);
+        received = httpd_req_recv(req, buffer + cur_len, total_length - cur_len);
         if(received <= 0) {
             error_text = JSON_ERROR("cannot receive request data");
             goto err_fail;
@@ -431,147 +432,149 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
     }
     buffer[total_length] = '\0';
 
-    cJSON* root = cJSON_Parse(buffer);
-    if(cJSON_GetObjectItem(root, "ap_ssid") != NULL) {
-        mstring_set(ap_ssid, cJSON_GetObjectItem(root, "ap_ssid")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [ap_ssid] field");
+    root = cJSON_Parse(buffer);
+    if(root == NULL || root->type != cJSON_Object) {
+        error_text = JSON_ERROR("invalid JSON request");
         goto err_fail;
     }
 
-    if(cJSON_GetObjectItem(root, "ap_pass") != NULL) {
-        mstring_set(ap_pass, cJSON_GetObjectItem(root, "ap_pass")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [ap_pass] field");
+    cJSON* ap_ssid = cJSON_GetObjectItemCaseSensitive(root, "ap_ssid");
+    cJSON* sta_ssid = cJSON_GetObjectItemCaseSensitive(root, "sta_ssid");
+    cJSON* hostname = cJSON_GetObjectItemCaseSensitive(root, "hostname");
+    cJSON* wifi_mode = cJSON_GetObjectItemCaseSensitive(root, "wifi_mode");
+    cJSON* usb_mode = cJSON_GetObjectItemCaseSensitive(root, "usb_mode");
+    cJSON* ap_pass_action = cJSON_GetObjectItemCaseSensitive(root, "ap_pass_action");
+    cJSON* sta_pass_action = cJSON_GetObjectItemCaseSensitive(root, "sta_pass_action");
+    cJSON* ap_pass = cJSON_GetObjectItemCaseSensitive(root, "ap_pass");
+    cJSON* sta_pass = cJSON_GetObjectItemCaseSensitive(root, "sta_pass");
+
+    if(ap_ssid == NULL || ap_ssid->type != cJSON_String || ap_ssid->valuestring == NULL ||
+       sta_ssid == NULL || sta_ssid->type != cJSON_String || sta_ssid->valuestring == NULL ||
+       hostname == NULL || hostname->type != cJSON_String || hostname->valuestring == NULL ||
+       wifi_mode == NULL || wifi_mode->type != cJSON_String || wifi_mode->valuestring == NULL ||
+       usb_mode == NULL || usb_mode->type != cJSON_String || usb_mode->valuestring == NULL ||
+       ap_pass_action == NULL || ap_pass_action->type != cJSON_String ||
+       ap_pass_action->valuestring == NULL || sta_pass_action == NULL ||
+       sta_pass_action->type != cJSON_String || sta_pass_action->valuestring == NULL) {
+        error_text = JSON_ERROR("required fields must be strings");
         goto err_fail;
     }
 
-    if(cJSON_GetObjectItem(root, "sta_ssid") != NULL) {
-        mstring_set(sta_ssid, cJSON_GetObjectItem(root, "sta_ssid")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [sta_ssid] field");
+    if(strlen(ap_ssid->valuestring) == 0 || strlen(ap_ssid->valuestring) > 32) {
+        error_text = JSON_ERROR("invalid value in [ap_ssid]");
         goto err_fail;
     }
-
-    if(cJSON_GetObjectItem(root, "sta_pass") != NULL) {
-        mstring_set(sta_pass, cJSON_GetObjectItem(root, "sta_pass")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [sta_pass] field");
+    if(strlen(sta_ssid->valuestring) == 0 || strlen(sta_ssid->valuestring) > 32) {
+        error_text = JSON_ERROR("invalid value in [sta_ssid]");
         goto err_fail;
     }
-
-    if(cJSON_GetObjectItem(root, "wifi_mode") != NULL) {
-        mstring_set(wifi_mode, cJSON_GetObjectItem(root, "wifi_mode")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [wifi_mode] field");
+    if(strlen(hostname->valuestring) == 0 || strlen(hostname->valuestring) > 32) {
+        error_text = JSON_ERROR("invalid value in [hostname]");
         goto err_fail;
     }
-
-    if(cJSON_GetObjectItem(root, "usb_mode") != NULL) {
-        mstring_set(usb_mode, cJSON_GetObjectItem(root, "usb_mode")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [usb_mode] field");
-        goto err_fail;
-    }
-
-    if(cJSON_GetObjectItem(root, "hostname") != NULL) {
-        mstring_set(hostname, cJSON_GetObjectItem(root, "hostname")->valuestring);
-    } else {
-        cJSON_Delete(root);
-        error_text = JSON_ERROR("request dont have [hostname] field");
-        goto err_fail;
-    }
-    cJSON_Delete(root);
-
-    if(strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_AP) != 0 &&
-       strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_STA) != 0 &&
-       strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_DISABLED) != 0) {
+    if(strcmp(wifi_mode->valuestring, CFG_WIFI_MODE_AP) != 0 &&
+       strcmp(wifi_mode->valuestring, CFG_WIFI_MODE_STA) != 0 &&
+       strcmp(wifi_mode->valuestring, CFG_WIFI_MODE_DISABLED) != 0) {
         error_text = JSON_ERROR("invalid value in [wifi_mode]");
         goto err_fail;
     }
-    if(strcmp(mstring_get_cstr(usb_mode), CFG_USB_MODE_BM) != 0 &&
-       strcmp(mstring_get_cstr(usb_mode), CFG_USB_MODE_DAP) != 0) {
+    if(strcmp(usb_mode->valuestring, CFG_USB_MODE_BM) != 0 &&
+       strcmp(usb_mode->valuestring, CFG_USB_MODE_DAP) != 0) {
         error_text = JSON_ERROR("invalid value in [usb_mode]");
         goto err_fail;
     }
 
-    if(nvs_config_set_ap_ssid(ap_ssid) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [ap_ssid]");
+    bool replace_ap_pass = strcmp(ap_pass_action->valuestring, "replace") == 0;
+    bool clear_ap_pass = strcmp(ap_pass_action->valuestring, "clear") == 0;
+    bool keep_ap_pass = strcmp(ap_pass_action->valuestring, "keep") == 0;
+    bool replace_sta_pass = strcmp(sta_pass_action->valuestring, "replace") == 0;
+    bool clear_sta_pass = strcmp(sta_pass_action->valuestring, "clear") == 0;
+    bool keep_sta_pass = strcmp(sta_pass_action->valuestring, "keep") == 0;
+
+    if(!replace_ap_pass && !clear_ap_pass && !keep_ap_pass) {
+        error_text = JSON_ERROR("invalid value in [ap_pass_action]");
         goto err_fail;
     }
-    if(nvs_config_set_ap_pass(ap_pass) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [ap_pass]");
+    if(!replace_sta_pass && !clear_sta_pass && !keep_sta_pass) {
+        error_text = JSON_ERROR("invalid value in [sta_pass_action]");
         goto err_fail;
     }
-    if(nvs_config_set_sta_ssid(sta_ssid) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [sta_ssid]");
+    if((replace_ap_pass &&
+        (ap_pass == NULL || ap_pass->type != cJSON_String || ap_pass->valuestring == NULL ||
+         strlen(ap_pass->valuestring) < 8 || strlen(ap_pass->valuestring) > 64)) ||
+       (!replace_ap_pass && ap_pass != NULL)) {
+        error_text = JSON_ERROR("password field does not match [ap_pass_action]");
         goto err_fail;
     }
-    if(nvs_config_set_sta_pass(sta_pass) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [sta_pass]");
+    if((replace_sta_pass &&
+        (sta_pass == NULL || sta_pass->type != cJSON_String || sta_pass->valuestring == NULL ||
+         strlen(sta_pass->valuestring) < 8 || strlen(sta_pass->valuestring) > 64)) ||
+       (!replace_sta_pass && sta_pass != NULL)) {
+        error_text = JSON_ERROR("password field does not match [sta_pass_action]");
         goto err_fail;
     }
 
-    if(strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_AP) == 0) {
+    /* All request validation is complete before the first configuration mutation. */
+    value = mstring_alloc();
+    mstring_set(value, ap_ssid->valuestring);
+    if(nvs_config_set_ap_ssid(value) != ESP_OK) goto write_fail;
+    mstring_set(value, sta_ssid->valuestring);
+    if(nvs_config_set_sta_ssid(value) != ESP_OK) goto write_fail;
+    if(replace_ap_pass || clear_ap_pass) {
+        mstring_set(value, replace_ap_pass ? ap_pass->valuestring : "");
+        if(nvs_config_set_ap_pass(value) != ESP_OK) goto write_fail;
+    }
+    if(replace_sta_pass || clear_sta_pass) {
+        mstring_set(value, replace_sta_pass ? sta_pass->valuestring : "");
+        if(nvs_config_set_sta_pass(value) != ESP_OK) goto write_fail;
+    }
+
+    if(strcmp(wifi_mode->valuestring, CFG_WIFI_MODE_AP) == 0) {
         if(nvs_config_set_wifi_mode(WiFiModeAP) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [wifi_mode]");
-            goto err_fail;
+            goto write_fail;
         }
-    } else if(strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_DISABLED) == 0) {
+    } else if(strcmp(wifi_mode->valuestring, CFG_WIFI_MODE_DISABLED) == 0) {
         if(nvs_config_set_wifi_mode(WiFiModeDisabled) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [wifi_mode]");
-            goto err_fail;
+            goto write_fail;
         }
     } else {
         if(nvs_config_set_wifi_mode(WiFiModeSTA) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [wifi_mode]");
-            goto err_fail;
+            goto write_fail;
         }
     }
 
-    if(strcmp(mstring_get_cstr(usb_mode), CFG_USB_MODE_DAP) == 0) {
+    if(strcmp(usb_mode->valuestring, CFG_USB_MODE_DAP) == 0) {
         if(nvs_config_set_usb_mode(UsbModeDAP) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [usb_mode]");
-            goto err_fail;
+            goto write_fail;
         }
     } else {
         if(nvs_config_set_usb_mode(UsbModeBM) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [usb_mode]");
-            goto err_fail;
+            goto write_fail;
         }
     }
 
-    if(nvs_config_set_hostname(hostname) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [hostname]");
-        goto err_fail;
-    }
+    mstring_set(value, hostname->valuestring);
+    if(nvs_config_set_hostname(value) != ESP_OK) goto write_fail;
 
     httpd_resp_sendstr(req, JSON_RESULT("WIFI settings saved"));
+    cJSON_Delete(root);
     free(buffer);
-    mstring_free(ap_ssid);
-    mstring_free(ap_pass);
-    mstring_free(sta_ssid);
-    mstring_free(sta_pass);
-    mstring_free(wifi_mode);
-    mstring_free(usb_mode);
-    mstring_free(hostname);
+    mstring_free(value);
     return ESP_OK;
 
-err_fail:
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, error_text);
+write_fail:
+    error_text = JSON_ERROR("cannot save WIFI settings");
+    cJSON_Delete(root);
     free(buffer);
-    mstring_free(ap_ssid);
-    mstring_free(ap_pass);
-    mstring_free(sta_ssid);
-    mstring_free(sta_pass);
-    mstring_free(wifi_mode);
-    mstring_free(hostname);
+    mstring_free(value);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, error_text);
+    return ESP_FAIL;
+
+err_fail:
+    cJSON_Delete(root);
+    free(buffer);
+    httpd_resp_set_status(req, HTTPD_400_BAD_REQUEST);
+    httpd_resp_sendstr(req, error_text);
     return ESP_FAIL;
 }
 

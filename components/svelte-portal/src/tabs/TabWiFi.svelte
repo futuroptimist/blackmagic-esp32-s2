@@ -18,6 +18,8 @@
     let sta_pass_input;
     let hostname_input;
     let popup_select_net;
+    let ap_pass_clear = false;
+    let sta_pass_clear = false;
 
     let popup = {
         text: "",
@@ -35,16 +37,31 @@
         popup.self.show();
         popup = popup;
 
+        const ap_pass = ap_pass_input.get_value();
+        const sta_pass = sta_pass_input.get_value();
+        const settings = {
+            wifi_mode: mode_select.get_value(),
+            usb_mode: usb_mode_select.get_value(),
+            ap_ssid: ap_ssid_input.get_value(),
+            ap_pass_action: ap_pass_clear
+                ? "clear"
+                : ap_pass.length > 0
+                ? "replace"
+                : "keep",
+            sta_ssid: sta_ssid_input.get_value(),
+            sta_pass_action: sta_pass_clear
+                ? "clear"
+                : sta_pass.length > 0
+                ? "replace"
+                : "keep",
+            hostname: hostname_input.get_value(),
+        };
+
+        if (settings.ap_pass_action == "replace") settings.ap_pass = ap_pass;
+        if (settings.sta_pass_action == "replace") settings.sta_pass = sta_pass;
+
         await api
-            .post("/api/v1/wifi/set_credentials", {
-                wifi_mode: mode_select.get_value(),
-                usb_mode: usb_mode_select.get_value(),
-                ap_ssid: ap_ssid_input.get_value(),
-                ap_pass: ap_pass_input.get_value(),
-                sta_ssid: sta_ssid_input.get_value(),
-                sta_pass: sta_pass_input.get_value(),
-                hostname: hostname_input.get_value(),
-            })
+            .post("/api/v1/wifi/set_credentials", settings)
             .then((json) => {
                 if (json.error) {
                     popup.text = json.error;
@@ -87,7 +104,27 @@
         </Value>
 
         <Value name="Pass">
-            <Input value={json.sta_pass} bind:this={sta_pass_input} />
+            <Input
+                type="password"
+                bind:this={sta_pass_input}
+                input={(value) => {
+                    if (value.length > 0) sta_pass_clear = false;
+                }}
+            />
+            <ButtonInline
+                value={sta_pass_clear ? "UNDO CLEAR" : "CLEAR"}
+                on:click={() => {
+                    sta_pass_clear = !sta_pass_clear;
+                    if (sta_pass_clear) sta_pass_input.set_value("");
+                }}
+            />
+            {#if sta_pass_clear}
+                Will be cleared on save
+            {:else if json.sta_pass_configured}
+                Configured
+            {:else}
+                Not configured
+            {/if}
         </Value>
 
         <Value name="AP" splitter={true}>(own access point)</Value>
@@ -97,7 +134,27 @@
         </Value>
 
         <Value name="Pass">
-            <Input value={json.ap_pass} bind:this={ap_pass_input} />
+            <Input
+                type="password"
+                bind:this={ap_pass_input}
+                input={(value) => {
+                    if (value.length > 0) ap_pass_clear = false;
+                }}
+            />
+            <ButtonInline
+                value={ap_pass_clear ? "UNDO CLEAR" : "CLEAR"}
+                on:click={() => {
+                    ap_pass_clear = !ap_pass_clear;
+                    if (ap_pass_clear) ap_pass_input.set_value("");
+                }}
+            />
+            {#if ap_pass_clear}
+                Will be cleared on save
+            {:else if json.ap_pass_configured}
+                Configured
+            {:else}
+                Not configured
+            {/if}
         </Value>
 
         <Value name="Hostname">
