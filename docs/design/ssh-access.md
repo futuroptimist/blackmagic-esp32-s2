@@ -23,10 +23,12 @@ Current behavior, which this proposal does not describe as SSH:
   the WebSocket or TCP socket is written back to that UART (`main/usb-uart.c`,
   `main/network-http.c`, `main/network-uart.c`). This is a byte bridge/log path,
   not evidence that the stock Flipper CLI is available.
-- The unauthenticated HTTP server serves the landing page at `/`, the Svelte
-  configuration UI at `/config`, JSON APIs, and a bidirectional UART WebSocket
-  at `/api/v1/uart/websocket` (`main/network-http.c`,
-  `components/svelte-portal`).
+- The HTTP server currently has no authentication. It serves the landing page
+  at `/`, the Svelte configuration UI at `/config`, and JSON APIs. In
+  particular, `/api/v1/wifi/get_credentials` returns stored AP and station
+  passwords, `/api/v1/wifi/set_credentials` writes configuration,
+  `/api/v1/system/reboot` reboots the board, and `/api/v1/uart/websocket` is a
+  bidirectional UART bridge (`main/network-http.c`, `components/svelte-portal`).
 - IPv4 listeners bound to all interfaces expose bidirectional raw UART on TCP
   port 3456 and Blackmagic GDB transport on TCP port 2345. Each listener accepts
   one connection at a time (`main/network-uart.c`, `main/network-gdb.c`).
@@ -76,8 +78,8 @@ interface, not a Unix shell.
 An optional `exec` channel accepts exactly one registered command and its
 validated arguments. It must never invoke a shell or accept shell expansion,
 pipelines, redirects, environment execution, command chaining, or arbitrary
-command strings. For example, the intended shape is `ssh flipper@flipper.local
-device_info`, subject to the remote policy below.
+command strings. For example, the intended shape is
+`ssh flipper@flipper.local device_info`, subject to the remote policy below.
 
 Only when implementation starts, separate the CLI's input/output session
 plumbing from its command registry. Preserve one set of command handlers for
@@ -251,6 +253,15 @@ disabling/removing the SSH service without changing existing startup paths.
 Recovery must remain possible over the trusted local path even after corrupt
 configuration or host-key loss; factory reset restores a disabled, unenrolled
 state with a newly generated host identity for the next enrollment.
+
+Preserving `/`, `/config`, and HTTP API functionality does not mean preserving
+their current unauthenticated security properties. Hardening the coordinated UI
+and API is a prerequisite for SSH rollout: API responses must no longer return
+stored passwords; state-changing routes must be authenticated, disabled, or
+equivalently restricted; and the UI/API contract must distinguish leaving a
+stored password unchanged from explicitly replacing or clearing it. That
+hardening is implementation work and is not part of this documentation-only
+proposal.
 
 ## Open decisions
 
