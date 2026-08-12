@@ -76,7 +76,7 @@ interface, not a Unix shell.
 An optional `exec` channel accepts exactly one registered command and its
 validated arguments. It must never invoke a shell or accept shell expansion,
 pipelines, redirects, environment execution, command chaining, or arbitrary
-command strings. For example, the intended shape is `ssh flipper.local
+command strings. For example, the intended shape is `ssh flipper@flipper.local
 device_info`, subject to the remote policy below.
 
 Only when implementation starts, separate the CLI's input/output session
@@ -134,8 +134,8 @@ files) needs a separate, explicit remote-access policy. Representative inventory
 
 | Class | Existing examples | Initial remote policy |
 | --- | --- | --- |
-| Read-only diagnostics | `help`, `ping`, `device_info`, `gpio_get`, `wifi_ip`, `wifi_sta_info`, `wifi_ap_clients` | Allow individually after output/side-effect review. |
-| State-changing administration | `led`, `gpio_set`, `wifi_scan`, `config_set_wifi_mode`, `config_set_usb_mode`, SSID/password/hostname setters, `reboot` | Deny by default; enable individually with validation and an administration policy. |
+| Read-only diagnostics | `help`, `ping`, `device_info`, `wifi_ip`, `wifi_sta_info`, `wifi_ap_clients` | Allow individually after output/side-effect review. |
+| State-changing administration | `led`, `gpio_get`, `gpio_set`, `wifi_scan`, `config_set_wifi_mode`, `config_set_usb_mode`, SSID/password/hostname setters, `reboot` | Deny by default; enable individually with validation and an administration policy. |
 | Destructive or secret-bearing | `factory_reset`, `nvs_dump`, current `config_get` | Initially deny or replace with a safe projection. |
 
 `config_get` currently prints AP and station passwords
@@ -144,6 +144,11 @@ Unrestricted `nvs_dump` must not be exposed. Gate or initially disable
 `factory_reset`, which erases NVS (`main/cli/cli-commands.c`). Successful SSH
 authentication alone does not make every local diagnostic or its output safe
 for remote use.
+
+Despite its name, `gpio_get` is state-changing: its current implementation
+configures requested pins as inputs before reading them, and permits debugging
+and CLI UART pins. Keep it disabled remotely unless it is restricted or
+reimplemented so a read cannot disrupt debugging or local recovery access.
 
 ## SSH library decision
 
@@ -164,9 +169,9 @@ compatibility or licensing from a library name alone.
 
 ## Runtime and failure behavior
 
-- Start SSH only after networking is available and valid enabled SSH
-  configuration has loaded. Default availability is station mode on the local
-  LAN; AP-mode exposure requires an explicit policy decision.
+- Start SSH only after networking is available and a valid, enabled SSH
+  configuration has loaded successfully. Default availability is station mode
+  on the local LAN; AP-mode exposure requires an explicit policy decision.
 - Bound all allocations, packets, line lengths, queues, and output. Limit
   authentication attempts, impose an idle timeout, and initially permit one
   active session. A slow writer must yield or disconnect rather than block
