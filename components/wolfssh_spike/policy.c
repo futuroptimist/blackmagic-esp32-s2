@@ -31,7 +31,8 @@ int policy_key_matches(const uint8_t* presented, size_t presented_len,
     uint8_t diff;
     size_t i;
 
-    if (presented == NULL || authorized == NULL) {
+    if (presented == NULL || authorized == NULL || presented_len == 0 ||
+        authorized_len == 0) {
         return 0;
     }
     if (presented_len != authorized_len) {

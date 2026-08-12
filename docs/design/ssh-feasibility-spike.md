@@ -163,10 +163,10 @@ wolfSSL/wolfSSH headers and `user_settings.h` are added via
 not leak into `main/` or any other component, satisfying "avoid exposing
 wolfSSL/wolfSSH configuration macros globally."
 
-**Listener/task lifecycle.** `wolfssh_spike_start()` creates one FreeRTOS
-task, mirroring the shape of `main/network-gdb.c` and `main/network-uart.c`
-(`xTaskCreate(..., stack, NULL, priority 5)`, blocking accept loop) with two
-deliberate differences:
+**Listener/task lifecycle.** `wolfssh_spike_start()` creates a FreeRTOS
+listener task, mirroring the blocking accept-loop shape of
+`main/network-gdb.c` and `main/network-uart.c`, with two deliberate
+differences:
 
 1. Before creating any socket, the task polls the existing
    `network_get_ip()` accessor (`main/network.h`, already public, already
@@ -174,13 +174,14 @@ deliberate differences:
    non-zero IP. No new event group and no change to `main/network.c` — the
    readiness signal that would otherwise require touching shared networking
    code is entirely avoided.
-2. Unlike the GDB/UART listeners' plain `listen(sock, 1)`, this task keeps
-   accepting on the listening socket even while a session is active, and
-   immediately closes any additional accepted socket rather than leaving it
-   queued in the TCP backlog. A bare backlog of 1 does not itself refuse a
-   second client at the TCP level — the kernel will silently queue it — so
-   "a second simultaneous connection fails cleanly" requires this explicit
-   accept-and-reject behavior, not just a small backlog number.
+2. Unlike the GDB/UART listeners, the listener starts one separate session
+   task for the active client. It therefore keeps accepting while that
+   session blocks in wolfSSH and immediately closes any additional accepted
+   socket rather than leaving it queued in the TCP backlog. A bare backlog
+   of 1 does not itself refuse a second client at the TCP level — the kernel
+   will silently queue it — so "a second simultaneous connection fails
+   cleanly" requires this explicit accept-and-reject behavior, not just a
+   small backlog number.
 
 **Authentication callback.** `wolfSSH_SetUserAuth(ctx, wolfssh_spike_auth_cb)`
 registers a callback that:

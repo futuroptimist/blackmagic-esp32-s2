@@ -4,7 +4,7 @@
  * decision in this file.
  *
  * Scope, deliberately narrow:
- *   - one FreeRTOS task, one TCP listener on port 2222
+ *   - one listener task plus at most one session task on port 2222
  *   - one session/channel at a time; any extra connection is accepted and
  *     immediately closed, never left queued
  *   - public-key auth only, fixed username "flipper", one authorized key
@@ -30,6 +30,7 @@
 #include <wolfssh/error.h>
 
 #include "policy.h"
+#include "allocator.h"
 
 static const char* TAG = "wolfssh_spike";
 
@@ -63,6 +64,11 @@ static uint32_t (*g_get_station_ip)(void) = NULL;
  * expose a configurable max-auth-attempts bound, so this is enforced
  * explicitly here rather than assumed. */
 static int g_auth_attempts = 0;
+
+typedef struct {
+    WOLFSSH* ssh;
+    bool channel_opened;
+} connection_state_t;
 
 /* ---- resource-checkpoint instrumentation (never logs key material) --- */
 
@@ -145,7 +151,7 @@ static int user_auth_cb(byte authType, WS_UserAuthData* authData, void* ctx)
 static int channel_open_cb(WOLFSSH_CHANNEL* channel, void* ctx)
 {
     const char* channelType;
-    (void)ctx;
+    connection_state_t* state = (connection_state_t*)ctx;
 
     channelType = wolfSSH_ChannelGetType(channel);
     if (channelType == NULL || strcmp(channelType, "session") != 0) {
@@ -154,6 +160,11 @@ static int channel_open_cb(WOLFSSH_CHANNEL* channel, void* ctx)
         ESP_LOGW(TAG, "rejecting non-session channel open");
         return WS_FATAL_ERROR;
     }
+    if (state == NULL || state->channel_opened) {
+        ESP_LOGW(TAG, "rejecting additional session channel");
+        return WS_FATAL_ERROR;
+    }
+    state->channel_opened = true;
     return WS_SUCCESS;
 }
 
@@ -175,13 +186,14 @@ static int channel_req_subsys_cb(WOLFSSH_CHANNEL* channel, void* ctx)
 
 static int channel_req_exec_cb(WOLFSSH_CHANNEL* channel, void* ctx)
 {
-    /* ctx is the owning WOLFSSH* session, set via wolfSSH_SetChannelReqCtx()
-     * in handle_connection() -- there is no public accessor that derives a
-     * WOLFSSH* from a WOLFSSH_CHANNEL*, and wolfSSH_SetExitStatus() needs
-     * one. The command string, by contrast, is available directly from the
-     * channel via wolfSSH_ChannelGetSessionCommand(). */
-    WOLFSSH* ssh = (WOLFSSH*)ctx;
+    /* ctx holds per-connection state, set via wolfSSH_SetChannelReqCtx().
+     * The allocation wrapper retains the requested size because wolfSSH's
+     * public command accessor exposes the bytes but not their SSH protocol
+     * length. Using that size (minus wolfSSH's trailing NUL) prevents an
+     * embedded NUL from truncating the command during policy validation. */
+    connection_state_t* state = (connection_state_t*)ctx;
     const char* command;
+    size_t command_allocation_size;
 
     if (wolfSSH_ChannelIsPty(channel)) {
         ESP_LOGW(TAG, "rejecting exec with PTY allocated");
@@ -189,8 +201,10 @@ static int channel_req_exec_cb(WOLFSSH_CHANNEL* channel, void* ctx)
     }
 
     command = wolfSSH_ChannelGetSessionCommand(channel);
+    command_allocation_size = wolfssh_spike_allocation_size(command);
     if (command == NULL ||
-        !policy_command_allowed(command, strlen(command))) {
+        command_allocation_size == 0 ||
+        !policy_command_allowed(command, command_allocation_size - 1)) {
         ESP_LOGW(TAG, "rejecting unsupported exec command");
         return WS_FATAL_ERROR;
     }
@@ -198,8 +212,8 @@ static int channel_req_exec_cb(WOLFSSH_CHANNEL* channel, void* ctx)
     if (wolfSSH_ChannelSend(channel, (const byte*)"pong\n", 5) < 0) {
         return WS_FATAL_ERROR;
     }
-    if (ssh != NULL) {
-        wolfSSH_SetExitStatus(ssh, 0);
+    if (state != NULL && state->ssh != NULL) {
+        wolfSSH_SetExitStatus(state->ssh, 0);
     }
     return WS_SUCCESS;
 }
@@ -209,6 +223,7 @@ static int channel_req_exec_cb(WOLFSSH_CHANNEL* channel, void* ctx)
 static void handle_connection(int client_sock)
 {
     WOLFSSH* ssh;
+    connection_state_t state = {0};
     int ret;
     TickType_t deadline;
     struct timeval io_timeout = {.tv_sec = WOLFSSH_SPIKE_IO_TIMEOUT_S,
@@ -228,9 +243,11 @@ static void handle_connection(int client_sock)
         return;
     }
     wolfSSH_set_fd(ssh, client_sock);
+    state.ssh = ssh;
     /* See channel_req_exec_cb(): this is how it recovers a WOLFSSH* from a
      * WOLFSSH_CHANNEL*. */
-    wolfSSH_SetChannelReqCtx(ssh, (void*)ssh);
+    wolfSSH_SetChannelOpenCtx(ssh, &state);
+    wolfSSH_SetChannelReqCtx(ssh, &state);
 
     log_resource_checkpoint("before_handshake");
 
@@ -279,6 +296,15 @@ static void handle_connection(int client_sock)
     close(client_sock);
 
     log_resource_checkpoint("after_disconnect");
+}
+
+static void connection_task(void* arg)
+{
+    int client_sock = (int)(intptr_t)arg;
+
+    handle_connection(client_sock);
+    g_session_active = false;
+    vTaskDelete(NULL);
 }
 
 /* ---- listener task: accept-and-reject-if-busy, poll for IP first ----- */
@@ -334,8 +360,13 @@ static void wolfssh_spike_task(void* arg)
         }
 
         g_session_active = true;
-        handle_connection(client_sock);
-        g_session_active = false;
+        if (xTaskCreate(connection_task, "wolfssh_session",
+                        WOLFSSH_SPIKE_TASK_STACK, (void*)(intptr_t)client_sock,
+                        WOLFSSH_SPIKE_TASK_PRIORITY, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "failed to create session task");
+            g_session_active = false;
+            close(client_sock);
+        }
     }
 }
 
@@ -344,6 +375,10 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
     size_t host_key_len = (size_t)(embedded_host_key_pem_end -
                                     embedded_host_key_pem_start);
 
+    if (get_station_ip == NULL) {
+        ESP_LOGE(TAG, "station IP callback must not be NULL");
+        return;
+    }
     g_get_station_ip = get_station_ip;
 
     wolfSSH_Init();

@@ -62,6 +62,7 @@ static void test_key_matches(void)
     const uint8_t key_a_copy[] = {0x01, 0x02, 0x03, 0x04};
     const uint8_t key_b[] = {0x01, 0x02, 0x03, 0x05};
     const uint8_t key_short[] = {0x01, 0x02, 0x03};
+    const uint8_t empty_key[] = {0};
 
     CHECK("key: identical bytes match",
           policy_key_matches(key_a, sizeof(key_a), key_a_copy,
@@ -73,6 +74,8 @@ static void test_key_matches(void)
                               sizeof(key_short)) == 0);
     CHECK("key: empty vs empty is not a match (no wildcard keys)",
           policy_key_matches(NULL, 0, NULL, 0) == 0);
+    CHECK("key: non-NULL zero-length keys are rejected",
+          policy_key_matches(empty_key, 0, empty_key, 0) == 0);
     CHECK("key: NULL presented rejected",
           policy_key_matches(NULL, 4, key_a, sizeof(key_a)) == 0);
     CHECK("key: NULL authorized rejected",
