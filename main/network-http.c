@@ -17,7 +17,7 @@
 #define JSON_RESULT(result_text) "{\"result\": \"" result_text "\"}"
 
 #define WIFI_SCAN_SIZE 20
-#define WIFI_CREDENTIALS_REQUEST_MAX_LENGTH 2048
+#define WIFI_CREDENTIALS_MAX_REQUEST_SIZE 2048
 
 static httpd_handle_t server = NULL;
 typedef struct {
@@ -472,7 +472,7 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
     httpd_err_code_t error_code = HTTPD_400_BAD_REQUEST;
     int received = 0;
 
-    if(total_length == 0 || total_length > WIFI_CREDENTIALS_REQUEST_MAX_LENGTH) {
+    if(total_length == 0 || total_length > WIFI_CREDENTIALS_MAX_REQUEST_SIZE) {
         error_text = JSON_ERROR("invalid request length");
         goto err_fail;
     }
@@ -544,53 +544,53 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
     error_code = HTTPD_500_INTERNAL_SERVER_ERROR;
 
     if(nvs_config_set_ap_ssid(ap_ssid) != ESP_OK) {
-        error_text = JSON_ERROR("cannot save [ap_ssid]");
+        error_text = JSON_ERROR("cannot persist [ap_ssid]");
         goto err_fail;
     }
     if(ap_pass_action != PasswordActionKeep && nvs_config_set_ap_pass(ap_pass) != ESP_OK) {
-        error_text = JSON_ERROR("cannot save [ap_pass]");
+        error_text = JSON_ERROR("cannot persist [ap_pass]");
         goto err_fail;
     }
     if(nvs_config_set_sta_ssid(sta_ssid) != ESP_OK) {
-        error_text = JSON_ERROR("cannot save [sta_ssid]");
+        error_text = JSON_ERROR("cannot persist [sta_ssid]");
         goto err_fail;
     }
     if(sta_pass_action != PasswordActionKeep && nvs_config_set_sta_pass(sta_pass) != ESP_OK) {
-        error_text = JSON_ERROR("cannot save [sta_pass]");
+        error_text = JSON_ERROR("cannot persist [sta_pass]");
         goto err_fail;
     }
 
     if(strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_AP) == 0) {
         if(nvs_config_set_wifi_mode(WiFiModeAP) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [wifi_mode]");
+            error_text = JSON_ERROR("cannot persist [wifi_mode]");
             goto err_fail;
         }
     } else if(strcmp(mstring_get_cstr(wifi_mode), CFG_WIFI_MODE_DISABLED) == 0) {
         if(nvs_config_set_wifi_mode(WiFiModeDisabled) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [wifi_mode]");
+            error_text = JSON_ERROR("cannot persist [wifi_mode]");
             goto err_fail;
         }
     } else {
         if(nvs_config_set_wifi_mode(WiFiModeSTA) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [wifi_mode]");
+            error_text = JSON_ERROR("cannot persist [wifi_mode]");
             goto err_fail;
         }
     }
 
     if(strcmp(mstring_get_cstr(usb_mode), CFG_USB_MODE_DAP) == 0) {
         if(nvs_config_set_usb_mode(UsbModeDAP) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [usb_mode]");
+            error_text = JSON_ERROR("cannot persist [usb_mode]");
             goto err_fail;
         }
     } else {
         if(nvs_config_set_usb_mode(UsbModeBM) != ESP_OK) {
-            error_text = JSON_ERROR("cannot set [usb_mode]");
+            error_text = JSON_ERROR("cannot persist [usb_mode]");
             goto err_fail;
         }
     }
 
     if(nvs_config_set_hostname(hostname) != ESP_OK) {
-        error_text = JSON_ERROR("cannot save [hostname]");
+        error_text = JSON_ERROR("cannot persist [hostname]");
         goto err_fail;
     }
 
