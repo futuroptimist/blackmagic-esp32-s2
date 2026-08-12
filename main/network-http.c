@@ -17,6 +17,7 @@
 #define JSON_RESULT(result_text) "{\"result\": \"" result_text "\"}"
 
 #define WIFI_SCAN_SIZE 20
+#define WIFI_CREDENTIALS_REQUEST_MAX_LENGTH 2048
 
 static httpd_handle_t server = NULL;
 typedef struct {
@@ -471,7 +472,7 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
     httpd_err_code_t error_code = HTTPD_400_BAD_REQUEST;
     int received = 0;
 
-    if(total_length == 0 || total_length >= 256) {
+    if(total_length == 0 || total_length > WIFI_CREDENTIALS_REQUEST_MAX_LENGTH) {
         error_text = JSON_ERROR("invalid request length");
         goto err_fail;
     }
@@ -486,6 +487,7 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
         received = httpd_req_recv(req, buffer + cur_len, total_length - cur_len);
         if(received <= 0) {
             error_text = JSON_ERROR("cannot receive request data");
+            error_code = HTTPD_500_INTERNAL_SERVER_ERROR;
             goto err_fail;
         }
         cur_len += received;
@@ -542,19 +544,19 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
     error_code = HTTPD_500_INTERNAL_SERVER_ERROR;
 
     if(nvs_config_set_ap_ssid(ap_ssid) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [ap_ssid]");
+        error_text = JSON_ERROR("cannot save [ap_ssid]");
         goto err_fail;
     }
     if(ap_pass_action != PasswordActionKeep && nvs_config_set_ap_pass(ap_pass) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [ap_pass]");
+        error_text = JSON_ERROR("cannot save [ap_pass]");
         goto err_fail;
     }
     if(nvs_config_set_sta_ssid(sta_ssid) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [sta_ssid]");
+        error_text = JSON_ERROR("cannot save [sta_ssid]");
         goto err_fail;
     }
     if(sta_pass_action != PasswordActionKeep && nvs_config_set_sta_pass(sta_pass) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [sta_pass]");
+        error_text = JSON_ERROR("cannot save [sta_pass]");
         goto err_fail;
     }
 
@@ -588,7 +590,7 @@ static esp_err_t wifi_set_credentials_handler(httpd_req_t* req) {
     }
 
     if(nvs_config_set_hostname(hostname) != ESP_OK) {
-        error_text = JSON_ERROR("invalid value in [hostname]");
+        error_text = JSON_ERROR("cannot save [hostname]");
         goto err_fail;
     }
 
