@@ -25,10 +25,13 @@ Current behavior, which this proposal does not describe as SSH:
   not evidence that the stock Flipper CLI is available.
 - The HTTP server currently has no authentication. It serves the landing page
   at `/`, the Svelte configuration UI at `/config`, and JSON APIs. In
-  particular, `/api/v1/wifi/get_credentials` returns stored AP and station
-  passwords, `/api/v1/wifi/set_credentials` writes configuration,
-  `/api/v1/system/reboot` reboots the board, and `/api/v1/uart/websocket` is a
-  bidirectional UART bridge (`main/network-http.c`, `components/svelte-portal`).
+  particular, `/api/v1/wifi/get_credentials` redacts stored AP and station
+  passwords and reports only whether each is configured. Password writes to
+  `/api/v1/wifi/set_credentials` explicitly distinguish keeping, replacing, or
+  clearing each stored value. State-changing configuration and reboot routes
+  remain unauthenticated, and `/api/v1/uart/websocket` remains an
+  unauthenticated bidirectional UART bridge (`main/network-http.c`,
+  `components/svelte-portal`).
 - IPv4 listeners bound to all interfaces expose bidirectional raw UART on TCP
   port 3456 and Blackmagic GDB transport on TCP port 2345. Each listener accepts
   one connection at a time (`main/network-uart.c`, `main/network-gdb.c`).
@@ -255,13 +258,11 @@ configuration or host-key loss; factory reset restores a disabled, unenrolled
 state with a newly generated host identity for the next enrollment.
 
 Preserving `/`, `/config`, and HTTP API functionality does not mean preserving
-their current unauthenticated security properties. Hardening the coordinated UI
-and API is a prerequisite for SSH rollout: API responses must no longer return
-stored passwords; state-changing routes must be authenticated, disabled, or
-equivalently restricted; and the UI/API contract must distinguish leaving a
-stored password unchanged from explicitly replacing or clearing it. That
-hardening is implementation work and is not part of this documentation-only
-proposal.
+their current unauthenticated security properties. The coordinated UI and API
+now redact credential responses and distinguish keeping, replacing, and
+clearing passwords. The remaining prerequisite for SSH rollout is to
+authenticate, disable, or equivalently restrict state-changing routes and the
+UART WebSocket; this hotfix does not authenticate the HTTP management plane.
 
 ## Open decisions
 
