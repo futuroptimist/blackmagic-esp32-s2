@@ -81,14 +81,32 @@ typedef struct {
 
 static void log_resource_checkpoint(const char* label)
 {
+    /* min_free_heap_since_boot is esp_get_minimum_free_heap_size(): the
+     * lowest free-heap value observed at any point since boot, sampled at
+     * this checkpoint -- it is NOT isolated to whatever happened between
+     * the previous checkpoint and this one. Treat it as a monotonically
+     * non-increasing running low-water-mark, not a per-phase delta. */
     ESP_LOGI(TAG,
-             "checkpoint=%s free_heap=%u min_free_heap=%u "
+             "checkpoint=%s free_heap=%u min_free_heap_since_boot=%u "
              "largest_free_block=%u stack_hwm=%u",
              label,
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
+}
+
+/* Elapsed wall-clock time (via the FreeRTOS tick count, so it is bounded
+ * by the same clock as the handshake deadline below) for the complete
+ * wolfSSH_accept() handshake+auth loop, logged on both success and
+ * failure. Never logs credentials or key material. */
+static void log_handshake_duration(TickType_t start_ticks, bool success)
+{
+    TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
+
+    ESP_LOGI(TAG, "handshake_auth_duration_ms=%u result=%s",
+             (unsigned)(elapsed_ticks * portTICK_PERIOD_MS),
+             success ? "success" : "failure");
 }
 
 /* ---- authentication: public key only, fixed user, single key --------- */
@@ -241,6 +259,7 @@ static void handle_connection(int client_sock)
     connection_state_t state = {0};
     int ret;
     TickType_t deadline;
+    TickType_t handshake_start_ticks;
     struct timeval io_timeout = {.tv_sec = WOLFSSH_SPIKE_IO_TIMEOUT_S,
                                   .tv_usec = 0};
 
@@ -266,8 +285,9 @@ static void handle_connection(int client_sock)
 
     log_resource_checkpoint("before_handshake");
 
-    deadline = xTaskGetTickCount() + pdMS_TO_TICKS(WOLFSSH_SPIKE_HANDSHAKE_MS +
-                                                     WOLFSSH_SPIKE_AUTH_MS);
+    handshake_start_ticks = xTaskGetTickCount();
+    deadline = handshake_start_ticks + pdMS_TO_TICKS(WOLFSSH_SPIKE_HANDSHAKE_MS +
+                                                       WOLFSSH_SPIKE_AUTH_MS);
     do {
         ret = wolfSSH_accept(ssh);
         if (ret == WS_SUCCESS) {
@@ -281,12 +301,14 @@ static void handle_connection(int client_sock)
 
     if (ret != WS_SUCCESS) {
         ESP_LOGW(TAG, "handshake/auth did not complete (ret=%d)", ret);
+        log_handshake_duration(handshake_start_ticks, false);
         log_resource_checkpoint("after_failed_handshake");
         wolfSSH_free(ssh);
         close(client_sock);
         return;
     }
 
+    log_handshake_duration(handshake_start_ticks, true);
     log_resource_checkpoint("after_auth");
 
     /* One exec request is serviced by channel_req_exec_cb() above; there
@@ -396,6 +418,11 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
     }
     g_get_station_ip = get_station_ip;
 
+    /* Logged here, before wolfSSH_Init() or any wolfSSH allocation, so the
+     * label matches its actual position: this is the pre-initialization
+     * baseline, not a post-setup snapshot. */
+    log_resource_checkpoint("before_ssh_init");
+
     wolfSSH_Init();
 
     g_ctx = wolfSSH_CTX_new(WOLFSSH_ENDPOINT_SERVER, NULL);
@@ -434,8 +461,6 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
     wolfSSH_CTX_SetChannelReqShellCb(g_ctx, channel_req_shell_cb);
     wolfSSH_CTX_SetChannelReqExecCb(g_ctx, channel_req_exec_cb);
     wolfSSH_CTX_SetChannelReqSubsysCb(g_ctx, channel_req_subsys_cb);
-
-    log_resource_checkpoint("before_ssh_init");
 
     xTaskCreate(wolfssh_spike_task, "wolfssh_spike", WOLFSSH_SPIKE_TASK_STACK,
                 NULL, WOLFSSH_SPIKE_TASK_PRIORITY, NULL);

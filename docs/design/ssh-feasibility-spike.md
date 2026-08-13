@@ -384,26 +384,44 @@ client                          ESP32-S2 (wolfssh_spike task)
 | --- | --- | --- |
 | Default build size (SSH disabled) | 965,008 bytes (baseline, pre-existing) | `build/blackmagic.bin`, read before this spike's changes |
 | Default build size after this spike's changes | 964,432 bytes (54% of factory partition free) | Local `idf.py build` (ESP-IDF v4.4.8 Docker image), unchanged apart from normal version-string/build-date drift; zero wolfSSH/wolfSSL objects in the build tree |
-| Experimental build size (SSH enabled) | 1,060,608 bytes / `0x102f00` (49% of factory partition free, 1,036,032 bytes headroom) | Local `idf.py build` with `CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y`, separate build dir + sdkconfig overlay, ephemeral developer keys |
-| Flash delta (experimental vs. default) | +96,176 bytes (~94 KiB) | Difference between the two rows above |
-| `libwolfssh_spike.a` size (wolfCrypt + wolfSSH + this spike's own code + embedded keys) | 94,524 bytes (82,035 text + 12,489 rodata + 25 data) | `idf.py size-components` on the experimental build |
-| Internal heap before SSH init | Pending hardware measurement | `esp_get_free_heap_size()` checkpoint |
-| Heap after listener initialization | Pending hardware measurement | same |
-| Minimum free heap during handshake/authentication | Pending hardware measurement | `esp_get_minimum_free_heap_size()` |
-| Largest free internal block | Pending hardware measurement | `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` |
-| Heap after disconnect | Pending hardware measurement | `esp_get_free_heap_size()` checkpoint |
-| Task stack high-water mark | Pending hardware measurement | `uxTaskGetStackHighWaterMark()` |
-| Handshake duration | Pending hardware measurement | wall-clock around `wolfSSH_accept()` loop |
+| Experimental build size (SSH enabled) | 1,060,784 bytes / `0x102fb0` (49% of factory partition free, 1,036,368 bytes headroom) | Local `idf.py build` with `CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y`, separate build dir + sdkconfig overlay, ephemeral developer keys |
+| Flash delta (experimental vs. default) | +96,352 bytes (~94 KiB) | Difference between the two rows above |
+| `libwolfssh_spike.a` size (wolfCrypt + wolfSSH + this spike's own code + embedded keys) | 94,704 bytes (82,127 text + 12,577 rodata + 25 data) | `idf.py size-components` on the experimental build |
+| Internal heap before SSH init | Pending hardware measurement | `esp_get_free_heap_size()` at the `before_ssh_init` checkpoint, which fires before `wolfSSH_Init()` or any wolfSSH allocation |
+| Heap after listener initialization | Pending hardware measurement | `esp_get_free_heap_size()` at the `after_listener_init` checkpoint |
+| Heap after handshake/authentication (success or failure) | Pending hardware measurement | `esp_get_free_heap_size()` at the `after_auth` / `after_failed_handshake` checkpoints |
+| Heap after disconnect | Pending hardware measurement | `esp_get_free_heap_size()` at the `after_disconnect` checkpoint |
+| Minimum free heap observed since boot, sampled at each checkpoint above | Pending hardware measurement | `esp_get_minimum_free_heap_size()` — a running low-water-mark over the device's whole uptime, not a delta isolated to the interval since the previous checkpoint; logged as `min_free_heap_since_boot` alongside every checkpoint |
+| Largest free internal block, sampled at each checkpoint above | Pending hardware measurement | `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` |
+| Task stack high-water mark, sampled at each checkpoint above | Pending hardware measurement | `uxTaskGetStackHighWaterMark()` |
+| Handshake+authentication duration, logged on both success and failure | Pending hardware measurement | FreeRTOS tick-count delta around the complete `wolfSSH_accept()` retry loop, logged as `handshake_auth_duration_ms` |
 | Repeated successful/failed connection behavior (target 100 cycles) | Pending hardware measurement | see operator checklist in the PR description |
 | macOS OpenSSH interoperability | Pending hardware measurement | `ssh -p 2222 -i <key> flipper@<board-ip> ping` |
 
+Checkpoint labels, in the order they can fire, and their exact code
+position: `before_ssh_init` (start of `wolfssh_spike_start()`, before
+`wolfSSH_Init()`) → `after_listener_init` (after `bind()`/`listen()`
+succeed) → `before_handshake` (right after `wolfSSH_set_fd()`, per
+connection) → `after_auth` or `after_failed_handshake` (immediately after
+the `wolfSSH_accept()` loop exits, whichever outcome) → `after_disconnect`
+(after `wolfSSH_shutdown()`/`wolfSSH_free()`/`close()`). All five, plus
+`handshake_auth_duration_ms`, are `ESP_LOGI` lines emitted by
+`wolfssh_spike.c`; reading them off the device's serial console is exactly
+how the pending hardware measurements above get filled in.
+
 No physical Flipper Zero Wi-Fi Board is available in the environment that
 produced this spike. Every figure above that requires hardware is marked
-`Pending hardware measurement` rather than estimated or fabricated. **The PR
-associated with this document is opened as a draft for exactly this reason**
-— it is not go for production, and it is not yet fully "go" for the spike
-itself until an operator runs the checklist in the PR description on real
-hardware.
+`Pending hardware measurement` rather than estimated or fabricated. The PR
+associated with this document is out of draft for maintainer review of the
+design and implementation, but it is not go for production, and it is not
+yet fully "go" for the spike itself, until an operator runs the checklist
+in the PR description on real hardware and records the results here in
+place of the `Pending hardware measurement` placeholders. Build-size
+figures above were measured locally against the pinned
+`espressif/idf:v4.4.8` Docker image; ccache state, host OS, and Docker
+version can shift object layout by a handful of bytes between runs on
+different machines, so treat them as representative rather than bit-for-bit
+invariant across every environment.
 
 ## 9. Go/no-go criteria
 
@@ -412,7 +430,7 @@ hardware.
       tree; source-level behavior unchanged since main.c's only change is
       inside `#if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER`, default `n`).
 - [x] Experimental build fits the application partition with documented
-      headroom (verified: 1,060,608 bytes, 49% of the 2 MB factory
+      headroom (verified: 1,060,784 bytes, 49% of the 2 MB factory
       partition free).
 - [x] No credentials or private keys are committed anywhere in the PR
       (verified: `scripts/gen_ssh_spike_keys.sh` writes only outside the
