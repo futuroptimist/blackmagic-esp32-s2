@@ -384,9 +384,9 @@ client                          ESP32-S2 (wolfssh_spike task)
 | --- | --- | --- |
 | Default build size (SSH disabled) | 965,008 bytes (baseline, pre-existing) | `build/blackmagic.bin`, read before this spike's changes |
 | Default build size after this spike's changes | 964,432 bytes (54% of factory partition free) | Local `idf.py build` (ESP-IDF v4.4.8 Docker image), unchanged apart from normal version-string/build-date drift; zero wolfSSH/wolfSSL objects in the build tree |
-| Experimental build size (SSH enabled) | 1,059,952 bytes / `0x102c70` (49% of factory partition free, 1,037,712 bytes headroom) | Local `idf.py build` with `CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y`, separate build dir + sdkconfig overlay, ephemeral developer keys |
-| Flash delta (experimental vs. default) | +95,520 bytes (~93 KiB) | Difference between the two rows above |
-| `libwolfssh_spike.a` size (wolfCrypt + wolfSSH + this spike's own code + embedded keys) | 93,875 bytes (81,645 text + 12,230 rodata + 25 data) | `idf.py size-components` on the experimental build |
+| Experimental build size (SSH enabled) | 1,060,608 bytes / `0x102f00` (49% of factory partition free, 1,036,032 bytes headroom) | Local `idf.py build` with `CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y`, separate build dir + sdkconfig overlay, ephemeral developer keys |
+| Flash delta (experimental vs. default) | +96,176 bytes (~94 KiB) | Difference between the two rows above |
+| `libwolfssh_spike.a` size (wolfCrypt + wolfSSH + this spike's own code + embedded keys) | 94,524 bytes (82,035 text + 12,489 rodata + 25 data) | `idf.py size-components` on the experimental build |
 | Internal heap before SSH init | Pending hardware measurement | `esp_get_free_heap_size()` checkpoint |
 | Heap after listener initialization | Pending hardware measurement | same |
 | Minimum free heap during handshake/authentication | Pending hardware measurement | `esp_get_minimum_free_heap_size()` |
@@ -412,7 +412,7 @@ hardware.
       tree; source-level behavior unchanged since main.c's only change is
       inside `#if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER`, default `n`).
 - [x] Experimental build fits the application partition with documented
-      headroom (verified: 1,059,952 bytes, 49% of the 2 MB factory
+      headroom (verified: 1,060,608 bytes, 49% of the 2 MB factory
       partition free).
 - [x] No credentials or private keys are committed anywhere in the PR
       (verified: `scripts/gen_ssh_spike_keys.sh` writes only outside the
