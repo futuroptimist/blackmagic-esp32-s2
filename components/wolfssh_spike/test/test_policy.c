@@ -82,11 +82,41 @@ static void test_key_matches(void)
           policy_key_matches(key_a, sizeof(key_a), NULL, 4) == 0);
 }
 
+static void test_claim_exec_once(void)
+{
+    int claimed = 0;
+
+    CHECK("exec claim: first claim succeeds",
+          policy_claim_exec_once(&claimed) == 1);
+    CHECK("exec claim: state is marked claimed after first claim",
+          claimed == 1);
+    CHECK("exec claim: second claim on the same state fails",
+          policy_claim_exec_once(&claimed) == 0);
+    CHECK("exec claim: repeated claims keep failing (no reset on retry)",
+          policy_claim_exec_once(&claimed) == 0);
+    CHECK("exec claim: NULL state fails closed",
+          policy_claim_exec_once(NULL) == 0);
+
+    {
+        /* A rejected/failed first exec must still consume the one shot --
+         * simulate by claiming once (as the real callback does before any
+         * command validation) regardless of what the "command" turns out
+         * to be, then confirm a second attempt is refused. */
+        int claimed_after_bad_command = 0;
+
+        CHECK("exec claim: claim succeeds even for what will be an invalid command",
+              policy_claim_exec_once(&claimed_after_bad_command) == 1);
+        CHECK("exec claim: a second request after a rejected first fails closed",
+              policy_claim_exec_once(&claimed_after_bad_command) == 0);
+    }
+}
+
 int main(void)
 {
     test_username();
     test_command();
     test_key_matches();
+    test_claim_exec_once();
 
     if (g_failures == 0) {
         printf("\nAll policy tests passed.\n");

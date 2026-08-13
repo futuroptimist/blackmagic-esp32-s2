@@ -68,6 +68,13 @@ static int g_auth_attempts = 0;
 typedef struct {
     WOLFSSH* ssh;
     bool channel_opened;
+    /* See policy_claim_exec_once(): must be 0 until the first exec
+     * request claims it. wolfSSH's channel-request dispatcher
+     * (DoChannelRequest() in the pinned src/internal.c) invokes
+     * channelReqExecCb for every "exec" channel request on a channel with
+     * no built-in limit -- this is the only thing enforcing "exactly one
+     * exec command per connection". */
+    int exec_claimed;
 } connection_state_t;
 
 /* ---- resource-checkpoint instrumentation (never logs key material) --- */
@@ -194,6 +201,14 @@ static int channel_req_exec_cb(WOLFSSH_CHANNEL* channel, void* ctx)
     connection_state_t* state = (connection_state_t*)ctx;
     const char* command;
     size_t command_allocation_size;
+
+    /* Claim the one allowed exec attempt before any validation or output.
+     * A malformed/rejected first command, or a send failure below, must
+     * not leave the one-shot open for a retry -- see policy.h. */
+    if (state == NULL || !policy_claim_exec_once(&state->exec_claimed)) {
+        ESP_LOGW(TAG, "rejecting exec request: no state or already consumed");
+        return WS_FATAL_ERROR;
+    }
 
     if (wolfSSH_ChannelIsPty(channel)) {
         ESP_LOGW(TAG, "rejecting exec with PTY allocated");

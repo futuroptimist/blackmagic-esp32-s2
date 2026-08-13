@@ -198,16 +198,29 @@ registers a callback that:
 - Returns `WOLFSSH_USERAUTH_INVALID_USER` / `WOLFSSH_USERAUTH_INVALID_PUBLICKEY`
   for any mismatch — never silently falls through.
 
-**Channel-request policy.** Every channel-request callback wolfSSH exposes is
-explicitly registered, not left unset:
+**Channel-request policy.** Every channel-request callback type wolfSSH
+*exposes a callback for* (`shell`, `exec`, `subsystem`, channel-open) is
+explicitly registered, not left unset. wolfSSH's own channel-request
+dispatcher (`DoChannelRequest()`, pinned `src/internal.c`) additionally
+handles a few request types — `env`, `pty-req`, `window-change`,
+`exit-status`, `exit-signal`, agent-forwarding — with no corresponding
+application callback at all; see the `env`/unknown-request bullet in
+[§7](#7-threat-and-safety-boundaries) for exactly what that means and
+does not mean.
 - `wolfSSH_CTX_SetChannelOpenCb` — allow only a `session` channel type; a
   `direct-tcpip`/forwarded-channel open request is rejected here before any
   request callback runs (this is also how forwarding is refused even though
-  `WOLFSSH_FWD` is compiled out — belt and suspenders).
-- `wolfSSH_CTX_SetChannelReqExecCb` — the only interesting callback: compares
-  the requested command against the exact string `ping` via
+  `WOLFSSH_FWD` is compiled out — belt and suspenders). Also refuses a
+  second channel on a connection that already opened one.
+- `wolfSSH_CTX_SetChannelReqExecCb` — the only interesting callback.
+  First claims a per-connection one-shot flag
+  (`policy_claim_exec_once()`) before doing anything else; a second exec
+  request on the same channel is rejected immediately by that claim,
+  regardless of whether the first request succeeded, was rejected, or
+  failed to send. Only once the claim succeeds does it compare the
+  requested command against the exact string `ping` via
   `policy_command_allowed()`; on match, writes `pong\n` with
-  `wolfSSH_stream_send()`, sets a success exit status with
+  `wolfSSH_ChannelSend()`, sets a success exit status with
   `wolfSSH_SetExitStatus()`, and lets the channel close. Any other command
   string is rejected (nonzero return, no shell fallback, no argument
   parsing/expansion of any kind).
@@ -303,6 +316,17 @@ client                          ESP32-S2 (wolfssh_spike task)
 - **No arbitrary command parser.** The exec callback does an exact string
   comparison against `ping` — no argument parsing, no shell invocation, no
   environment/command substitution of any kind.
+- **At most one exec request per connection.** The pinned wolfSSH
+  `DoChannelRequest()` (`src/internal.c`) invokes `channelReqExecCb` for
+  *every* `"exec"` channel request on an open channel — there is no
+  built-in limit, so without additional state a client could send `exec
+  ping`, get `pong`, and then send a second `exec ping` (or any other
+  command) on the same channel. This spike enforces "exactly one" itself:
+  `channel_req_exec_cb()` claims a per-connection one-shot flag
+  (`policy_claim_exec_once()`, `components/wolfssh_spike/policy.c`, unit
+  tested) *before* any command validation or output, so a second exec
+  request fails closed even if the first one was rejected (invalid
+  command) or failed partway (send error).
 - **No SCP, SFTP, forwarding, X11, agent forwarding, or arbitrary
   subsystems.** SCP/SFTP/agent/forwarding source files (`wolfscp.c`,
   `wolfsftp.c`, `agent.c`) are excluded from the component's source list
@@ -315,10 +339,30 @@ client                          ESP32-S2 (wolfssh_spike task)
   accept-and-reject listener behavior described in
   [§6](#6-prototype-architecture); the channel-open callback additionally
   refuses a second channel on an already-active session.
-- **Explicit rejection callbacks for unsupported requests.** Every
-  channel-request and channel-open callback wolfSSH exposes is registered
-  with a real handler; none rely on "no callback set" as an implicit
-  rejection.
+- **Explicit rejection callbacks for every request type wolfSSH exposes a
+  callback for.** `shell`, `exec`, `subsystem`, and channel-open are all
+  registered with a real handler; none rely on "no callback set" as an
+  implicit rejection.
+- **`env` and unknown channel-request types are not application-visible,
+  and are not "explicitly rejected."** This is a narrower claim than the
+  bullet above on purpose. The pinned wolfSSH `DoChannelRequest()`
+  (`src/internal.c`) does not expose a callback for either case: an `env`
+  request is parsed, its name/value logged at debug level, and then
+  discarded — the value is never stored anywhere this spike's code can
+  read, so it cannot influence which command runs or anything else. A
+  channel-request type matching none of wolfSSH's known types (not
+  `shell`/`exec`/`subsystem`/`pty-req`/`window-change`/`exit-status`/
+  `exit-signal`/agent-forwarding) falls through the same dispatcher with
+  no effect at all — no state changes, no callback fires. Both cases are
+  acknowledged back to the client as if successful (wolfSSH's dispatcher
+  sends `SendChannelSuccess` whenever no callback rejected the request),
+  which is a wolfSSH library behavior this spike does not alter — patching
+  or forking the pinned wolfSSH source to change that reply semantics is
+  explicitly out of scope for this feasibility spike. The practical
+  consequence is: `env` and unknown requests are harmless no-ops, not
+  attacker-controlled behavior, but they are not "rejected" in the same
+  sense as `shell`/PTY/second-exec/unsupported-command, which this spike's
+  own callbacks actively refuse.
 - **Station-mode/private-network use only.** The listener binds `INADDR_ANY`
   on the station interface's network the same way the existing GDB/UART
   listeners do; nothing in this spike exposes SSH differently than those

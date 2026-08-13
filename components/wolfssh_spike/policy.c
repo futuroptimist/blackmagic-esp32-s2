@@ -45,3 +45,12 @@ int policy_key_matches(const uint8_t* presented, size_t presented_len,
     }
     return diff == 0;
 }
+
+int policy_claim_exec_once(int* claimed)
+{
+    if (claimed == NULL || *claimed) {
+        return 0;
+    }
+    *claimed = 1;
+    return 1;
+}

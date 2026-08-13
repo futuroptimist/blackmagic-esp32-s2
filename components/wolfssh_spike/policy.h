@@ -33,6 +33,18 @@ int policy_command_allowed(const char* command, size_t command_len);
 int policy_key_matches(const uint8_t* presented, size_t presented_len,
                         const uint8_t* authorized, size_t authorized_len);
 
+/* Claims the single allowed exec request for one connection. `claimed`
+ * must point at a flag initialized to 0 before the first call for that
+ * connection. Returns 1 (and sets *claimed = 1) the first time this is
+ * called; returns 0 on every subsequent call, and 0 if `claimed` is NULL
+ * (fails closed on invalid/missing state).
+ *
+ * Callers must invoke this before any exec-command validation or output,
+ * so a malformed or rejected first request still consumes the one shot --
+ * a second exec request on the same channel must fail closed even if the
+ * first one failed. */
+int policy_claim_exec_once(int* claimed);
+
 #ifdef __cplusplus
 }
 #endif
