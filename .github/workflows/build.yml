@@ -193,7 +193,13 @@ jobs:
 
       - name: 'Report experimental build size'
         run: |
-          docker run --rm -v "$PWD:/project" -w /project espressif/idf:v4.4.8 \
+          docker run --rm \
+            -v "$PWD:/project" \
+            -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
+            -w /project \
+            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.pem \
+            -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
+            espressif/idf:v4.4.8 \
             bash -c "idf.py -B build-ssh-spike size && idf.py -B build-ssh-spike size-components"
 
       - name: 'Confirm canonical sdkconfig untouched'
@@ -208,4 +214,4 @@ jobs:
 
       - name: 'Discard experimental (key-bearing) build outputs'
         if: always()
-        run: rm -rf build-ssh-spike "$RUNNER_TEMP/wolfssh-spike-keys"
+        run: sudo rm -rf -- "$GITHUB_WORKSPACE/build-ssh-spike" "$RUNNER_TEMP/wolfssh-spike-keys"
