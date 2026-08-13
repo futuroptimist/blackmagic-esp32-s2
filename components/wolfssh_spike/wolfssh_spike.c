@@ -9,7 +9,11 @@
  *     immediately closed, never left queued
  *   - public-key auth only, fixed username "flipper", one authorized key
  *   - exactly one exec command ("ping" -> "pong\n" + success exit)
- *   - shell, PTY, subsystems, forwarding, agent, SCP, SFTP: all rejected
+ *   - shell, subsystems, forwarding, agent, SCP, SFTP: all rejected. A
+ *     pty-req is protocol-acknowledged (the pinned wolfSSH has no pty-req
+ *     rejection callback to hook) but that grants nothing: no exec/shell
+ *     request is ever serviced through the allocated PTY -- see
+ *     channel_req_exec_cb()'s wolfSSH_ChannelIsPty() check below.
  */
 #include "wolfssh_spike.h"
 

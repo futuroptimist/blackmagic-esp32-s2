@@ -21,9 +21,11 @@ that target, and the go/no-go conclusion.
   (`main/usb-uart.c`, `main/network-uart.c`) — SSH does not change that.
 - The prototype authenticates exactly one public key, permits exactly one
   connection at a time, and accepts exactly one exec command (`ping`, which
-  replies `pong\n`). Every other SSH capability — shell, PTY, subsystems,
-  SFTP, SCP, forwarding, agent/X11 forwarding, password/keyboard-interactive
-  auth — is explicitly rejected. See [§7](#7-threat-and-safety-boundaries).
+  replies `pong\n`). Every other SSH capability — shell, subsystems, SFTP,
+  SCP, forwarding, agent/X11 forwarding, password/keyboard-interactive auth
+  — is explicitly rejected. A PTY allocation request is protocol-acknowledged
+  rather than rejected, but grants nothing: no exec/shell request is ever
+  serviced through it. See [§7](#7-threat-and-safety-boundaries).
 
 ## 2. Questions this spike must answer
 
@@ -228,7 +230,15 @@ does not mean.
   — both registered as unconditional-reject callbacks. Neither a `shell`
   channel request nor any named subsystem (which would include a hypothetical
   `sftp` subsystem) succeeds.
-- No PTY allocation path is accepted anywhere in this callback set.
+- A `pty-req` is protocol-acknowledged, not rejected: it is one of the
+  request types with no application callback described above, so it falls
+  through wolfSSH's dispatcher the same way an `env` request does — logged,
+  never stored, acknowledged to the client as successful. That
+  acknowledgment grants nothing on its own; the actual boundary is one level
+  later, at the exec callback: `wolfSSH_ChannelIsPty()` rejects any exec
+  request made on a PTY-allocated channel (`channel_req_exec_cb()`,
+  `components/wolfssh_spike/wolfssh_spike.c`), so no command — supported or
+  not — is ever serviced through an allocated PTY.
 
 **Build-time key injection.** Two external inputs are required when the
 feature is enabled, both supplied out-of-tree:
@@ -311,8 +321,13 @@ client                          ESP32-S2 (wolfssh_spike task)
   `none` authentication path succeeds; `wolfSSH_SetUserAuthTypes` restricts
   the advertised methods and the auth callback independently re-checks
   `authType`.
-- **No interactive shell, no PTY.** The shell-request callback always
-  rejects; no PTY-allocation path is ever accepted.
+- **No interactive shell, and nothing runs through a PTY.** The
+  shell-request callback always rejects. A `pty-req` itself is
+  protocol-acknowledged (the pinned wolfSSH has no pty-req rejection
+  callback to hook — see [§6](#6-prototype-architecture)), but that grants
+  nothing: the exec callback's `wolfSSH_ChannelIsPty()` check refuses any
+  exec request on a PTY-allocated channel, so no interactive session and no
+  command of any kind is ever serviced through it.
 - **No arbitrary command parser.** The exec callback does an exact string
   comparison against `ping` — no argument parsing, no shell invocation, no
   environment/command substitution of any kind.
@@ -359,10 +374,13 @@ client                          ESP32-S2 (wolfssh_spike task)
   which is a wolfSSH library behavior this spike does not alter — patching
   or forking the pinned wolfSSH source to change that reply semantics is
   explicitly out of scope for this feasibility spike. The practical
-  consequence is: `env` and unknown requests are harmless no-ops, not
+  consequence is: `env` and unknown requests — and `pty-req`, which the
+  dispatcher handles the same way — are harmless no-ops, not
   attacker-controlled behavior, but they are not "rejected" in the same
-  sense as `shell`/PTY/second-exec/unsupported-command, which this spike's
-  own callbacks actively refuse.
+  sense as `shell`/second-exec/unsupported-command, which this spike's own
+  callbacks actively refuse. (A PTY-allocated channel is still denied
+  everything that matters: the exec callback refuses to service any command
+  on it — see [§6](#6-prototype-architecture).)
 - **Station-mode/private-network use only.** The listener binds `INADDR_ANY`
   on the station interface's network the same way the existing GDB/UART
   listeners do; nothing in this spike exposes SSH differently than those
@@ -505,13 +523,26 @@ What each mode's phases map back to in this document and in
 - `--mode experimental`: host-key fingerprint pinning; `ping` → exact
   `pong` + exit 0; negotiated kex/host-key/cipher algorithms match the
   restricted P-256/AES-256-GCM profile; unrecognized key, unknown username,
-  and password/keyboard-interactive auth are all confirmed `auth_rejected`;
-  unsupported exec command, shell request, PTY allocation, and subsystem
-  request are all confirmed `protocol_rejected` (authentication succeeded,
-  the specific request did not); TCP forwarding is probed with `ssh -W`
-  (a real direct-tcpip channel-open request the server must answer) rather
-  than a `-L ...:0...` specification, which OpenSSH rejects locally before
-  ever contacting the board and would prove nothing; a second simultaneous
+  and password/keyboard-interactive auth are all confirmed `auth_rejected`
+  with the server's advertised auth-method continuation list independently
+  confirmed to exclude password/keyboard-interactive; unsupported exec
+  command, shell request, and subsystem request are each confirmed rejected
+  by OpenSSH's own request-specific `<type> request failed on channel`
+  evidence for a genuine `SSH_MSG_CHANNEL_FAILURE` (not merely
+  `protocol_rejected`'s coarser "authenticated, then some non-zero exit"),
+  so a request the board actually serviced but which merely exited non-zero
+  cannot be mistaken for a refusal; a PTY-requested exec is confirmed the
+  same way — the pty-req itself is protocol-acknowledged (see
+  [§7](#7-threat-and-safety-boundaries)), so the evidence required is the
+  subsequent `exec request failed on channel` line plus the absence of
+  `pong`, not a (nonexistent) PTY-allocation refusal; TCP forwarding is
+  probed with `ssh -W` (a real direct-tcpip channel-open request the server
+  must answer) and requires the corresponding `channel N: open failed`
+  `SSH_MSG_CHANNEL_OPEN_FAILURE` evidence, so a forwarding request the board
+  accepted but whose destination connection later failed for an unrelated
+  reason cannot be mistaken for a rejected request, rather than a
+  `-L ...:0...` specification, which OpenSSH rejects locally before ever
+  contacting the board and would prove nothing; a second simultaneous
   connection is only attempted after independently confirming (via `nc -v`)
   that the held first connection actually connected, and is then required
   to fail as `transport_failure`/`protocol_rejected`/`auth_rejected` (the

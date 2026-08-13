@@ -214,11 +214,22 @@ run_with_timeout() {
 #                            evidence of anything this script is testing).
 #   protocol_rejected      -- the client got past authentication
 #                            ("Authenticated to ... using" is present) but
-#                            the connection still ended in failure -- the
-#                            expected shape for the board rejecting a
-#                            specific channel/exec/pty/subsystem/forwarding
-#                            request, or immediately closing a second
-#                            connection while one is already active.
+#                            the connection still ended in failure. This is
+#                            deliberately coarse: it is consistent with the
+#                            board rejecting a specific request, but also
+#                            with a request the board actually serviced
+#                            merely exiting non-zero, or an unrelated abrupt
+#                            post-auth close. A request-specific rejection
+#                            check must combine this class with the
+#                            corresponding evidence predicate below
+#                            (channel_request_failed(), channel_open_failed(),
+#                            advertised_auth_methods_excludes()) --
+#                            protocol_rejected alone is not sufficient
+#                            evidence for those checks. It remains
+#                            sufficient on its own only where a specific
+#                            request/operation is not being distinguished,
+#                            e.g. confirming a second simultaneous
+#                            connection did not succeed.
 #   timeout                -- run_with_timeout's watchdog had to kill it
 #                            (rc 124); ambiguous on its own and never
 #                            treated as proof of rejection.
@@ -290,6 +301,80 @@ class_in() {
         [[ "$needle" == "$c" ]] && return 0
     done
     return 1
+}
+
+# ---- request-specific rejection evidence -----------------------------------
+#
+# `protocol_rejected` above is deliberately coarse: "authenticated, then
+# some non-zero exit." That is not enough to prove a *specific* request was
+# refused -- a command the board actually ran could just happen to exit
+# non-zero, an authenticated session could close abruptly for an unrelated
+# reason, or a channel the board genuinely opened could fail later for a
+# reason that has nothing to do with the board's request-level policy. The
+# predicates below require the operation-specific evidence OpenSSH's own
+# client prints only when it receives a genuine protocol-level refusal (RFC
+# 4254 section 5.4), so every request-specific rejection check below
+# combines a `protocol_rejected` classification with one of these.
+
+# channel_request_failed <out_file> <request-type>
+#
+# True if the transcript contains OpenSSH's own, unprefixed
+# "<type> request failed on channel <N>" line -- printed by ssh(1) only
+# when it receives a real SSH_MSG_CHANNEL_FAILURE in reply to that exact
+# channel-request type. Confirmed against the installed ssh(1) binary:
+# "%s request failed on channel %d" is a single shared format string, with
+# "exec", "shell", "subsystem", and "pty-req" all present as distinct
+# request-type literals it is called with -- and confirmed live against a
+# genuine OpenSSH server (requesting an unconfigured subsystem name), which
+# produced exactly "subsystem request failed on channel 0". wolfSSH's own
+# SendChannelSuccess() (components/wolfssh_spike/wolfssh/src/internal.c)
+# sends a real SSH_MSG_CHANNEL_FAILURE, not merely a connection drop, for
+# any wantReply channel-request this spike's callbacks reject, so a
+# rejected exec/shell/subsystem request against this spike produces the
+# same client-side message confirmed above.
+channel_request_failed() {
+    local out_file="$1" request_type="$2"
+    grep -qE "^${request_type} request failed on channel [0-9]+\$" "$out_file"
+}
+
+# channel_open_failed <out_file>
+#
+# True if the transcript contains OpenSSH's own "channel N: open failed:
+# ..." line. This is a *different* protocol message from
+# channel_request_failed() above: SSH_MSG_CHANNEL_OPEN_FAILURE (a whole new
+# channel refused), not SSH_MSG_CHANNEL_FAILURE (a request on an
+# already-open channel refused). This is the evidence a rejected `-W`
+# direct-tcpip request produces. A channel-open the board genuinely
+# accepted, whose later use happens to fail for an unrelated reason, will
+# not print this line.
+channel_open_failed() {
+    local out_file="$1"
+    grep -qE '^channel [0-9]+: open failed:' "$out_file"
+}
+
+# advertised_auth_methods_excludes <out_file> <method>...
+#
+# True only if the transcript's "Authentications that can continue: ..."
+# line (OpenSSH's own report, from every SSH_MSG_USERAUTH_FAILURE, of the
+# server's remaining advertised auth methods) is present AND contains none
+# of the given method names. Returns false both when the line is missing
+# entirely and when any given method is present in it -- either way, that
+# is insufficient evidence the method is actually unavailable, as opposed
+# to some other, unrelated reason authentication with it failed.
+advertised_auth_methods_excludes() {
+    local out_file="$1"; shift
+    local methods_line
+    methods_line="$(grep -m1 -E 'Authentications that can continue:' "$out_file" 2>/dev/null || true)"
+    if [[ -z "$methods_line" ]]; then
+        return 1
+    fi
+    local m
+    for m in "$@"; do
+        if [[ "$methods_line" == *"$m"* ]]; then
+            return 1
+        fi
+    done
+    return 0
 }
 
 # Isolates the actual remote-command output line from an `ssh -v` capture:
@@ -504,10 +589,11 @@ test_password_rejected() {
     run_ssh "password_auth" "$COMMAND_TIMEOUT" \
         -o PreferredAuthentications=password,keyboard-interactive \
         -o PubkeyAuthentication=no -- ping
-    if [[ "$RUN_SSH_CLASS" == "auth_rejected" ]]; then
-        pass "password/keyboard-interactive authentication is unavailable (auth_rejected, exit $RUN_SSH_RC)"
+    if [[ "$RUN_SSH_CLASS" == "auth_rejected" ]] && \
+            advertised_auth_methods_excludes "$RUN_SSH_OUT" "password" "keyboard-interactive"; then
+        pass "password/keyboard-interactive authentication is unavailable (auth_rejected, exit $RUN_SSH_RC, server's advertised continuation methods exclude password and keyboard-interactive)"
     else
-        fail "password/keyboard-interactive auth: expected auth_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+        fail "password/keyboard-interactive auth: expected auth_rejected with the server's advertised continuation methods excluding password/keyboard-interactive, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED, the server still advertises one of those methods, or the failure is inconclusive (see $RUN_SSH_OUT)"
     fi
 }
 
@@ -515,19 +601,22 @@ test_unknown_command_rejected() {
     local out
     run_ssh "unknown_command" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- "not-a-real-command"
     out="$(cat "$RUN_SSH_OUT" 2>/dev/null || true)"
-    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" && "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
-        pass "unsupported exec command is rejected (protocol_rejected, exit $RUN_SSH_RC, no '$EXPECTED_PING_OUTPUT' in output)"
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]] && \
+            channel_request_failed "$RUN_SSH_OUT" "exec" && \
+            [[ "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
+        pass "unsupported exec command is rejected ('exec request failed on channel', exit $RUN_SSH_RC, no '$EXPECTED_PING_OUTPUT' in output)"
     else
-        fail "unsupported exec command: expected protocol_rejected with no '$EXPECTED_PING_OUTPUT' in output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC (see $RUN_SSH_OUT)"
+        fail "unsupported exec command: expected an 'exec request failed on channel' refusal with no '$EXPECTED_PING_OUTPUT' in output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC (see $RUN_SSH_OUT) -- a command that was actually executed and merely exited non-zero would not satisfy this"
     fi
 }
 
 test_shell_rejected() {
     run_ssh "shell_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" --
-    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]]; then
-        pass "interactive shell request is rejected (protocol_rejected, exit $RUN_SSH_RC)"
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]] && \
+            channel_request_failed "$RUN_SSH_OUT" "shell"; then
+        pass "interactive shell request is rejected ('shell request failed on channel', exit $RUN_SSH_RC)"
     else
-        fail "interactive shell request: expected protocol_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+        fail "interactive shell request: expected a 'shell request failed on channel' refusal, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
     fi
 }
 
@@ -535,31 +624,35 @@ test_pty_rejected() {
     local out
     run_ssh "pty_request" "$COMMAND_TIMEOUT" -tt -i "$IDENTITY" -- ping
     out="$(cat "$RUN_SSH_OUT" 2>/dev/null || true)"
-    # This spike's exec callback rejects a PTY'd exec request at the exec
-    # stage (wolfSSH_ChannelIsPty()), not at the pty-req stage itself --
-    # wolfSSH has no pty-req rejection callback to hook, so the pty-req is
-    # protocol-acknowledged and only the subsequent "ping" exec fails.
-    # There is deliberately no OpenSSH-client-side "PTY allocation
-    # request failed" string to match here (that message is what a
-    # *different* rejection mechanism -- the server refusing the pty-req
-    # itself -- produces, e.g. against a plain sshd with `no-pty`; it is
-    # not what this implementation does). The direct evidence available
-    # for *this* implementation is: authentication succeeded, the overall
-    # request still failed, and -- the actual security property under
-    # test -- "ping" was never serviced.
-    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" && "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
-        pass "PTY allocation is rejected (protocol_rejected, exit $RUN_SSH_RC, no '$EXPECTED_PING_OUTPUT' in output)"
+    # The pinned wolfSSH has no pty-req rejection callback to hook, so a
+    # pty-req is protocol-acknowledged (SSH_MSG_CHANNEL_SUCCESS) -- there is
+    # deliberately no "pty-req request failed on channel" line to look for
+    # here, and treating the absence of one as a failure would misdescribe
+    # what this implementation actually does (see docs/design/
+    # ssh-feasibility-spike.md sections 6-7). The real, durable security
+    # invariant enforced by this spike's exec callback
+    # (wolfSSH_ChannelIsPty()) is one level later: the *subsequent* "ping"
+    # exec request on that PTY'd channel is refused -- a genuine
+    # SSH_MSG_CHANNEL_FAILURE for the "exec" request, the same evidence
+    # channel_request_failed() checks for test_unknown_command_rejected()
+    # above -- and no interactive shell or supported command ever runs
+    # through the allocated PTY.
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]] && \
+            channel_request_failed "$RUN_SSH_OUT" "exec" && \
+            [[ "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
+        pass "pty-req is acknowledged but the subsequent exec is refused ('exec request failed on channel', exit $RUN_SSH_RC, no '$EXPECTED_PING_OUTPUT' in output) -- no command runs through the allocated PTY"
     else
-        fail "PTY allocation: expected protocol_rejected with no '$EXPECTED_PING_OUTPUT' in output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC (see $RUN_SSH_OUT)"
+        fail "PTY'd exec request: expected pty-req acknowledged followed by an 'exec request failed on channel' refusal with no '$EXPECTED_PING_OUTPUT' in output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC (see $RUN_SSH_OUT)"
     fi
 }
 
 test_subsystem_rejected() {
     run_ssh "subsystem_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" -s -- sftp
-    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]]; then
-        pass "subsystem request is rejected (protocol_rejected, exit $RUN_SSH_RC)"
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]] && \
+            channel_request_failed "$RUN_SSH_OUT" "subsystem"; then
+        pass "subsystem request is rejected ('subsystem request failed on channel', exit $RUN_SSH_RC)"
     else
-        fail "subsystem request: expected protocol_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+        fail "subsystem request: expected a 'subsystem request failed on channel' refusal, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
     fi
 }
 
@@ -570,14 +663,19 @@ test_forwarding_rejected() {
     # before ever contacting the server (a local_invocation_failure, not
     # evidence of anything the board did). A rejected -W request produces
     # OpenSSH's well-known "channel N: open failed: ..." message once
-    # authenticated, which classify_ssh_result() reports as
-    # protocol_rejected the same way it would any other post-auth refusal.
+    # authenticated -- a genuine SSH_MSG_CHANNEL_OPEN_FAILURE, checked
+    # explicitly via channel_open_failed() so that a forwarding request the
+    # board *accepted*, whose destination connection then failed for some
+    # unrelated reason, cannot be mistaken for a rejected request merely
+    # because classify_ssh_result() also classifies that as
+    # protocol_rejected.
     run_ssh "forwarding_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" \
         -W "127.0.0.1:$HTTP_PORT" --
-    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]]; then
-        pass "direct-tcpip channel-open (forwarding) request is rejected (protocol_rejected, exit $RUN_SSH_RC)"
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]] && \
+            channel_open_failed "$RUN_SSH_OUT"; then
+        pass "direct-tcpip channel-open (forwarding) request is rejected ('channel open failed', exit $RUN_SSH_RC)"
     else
-        fail "direct-tcpip channel-open request: expected protocol_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+        fail "direct-tcpip channel-open request: expected a 'channel N: open failed' refusal, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED, was accepted and failed later for an unrelated reason, or the failure is inconclusive (see $RUN_SSH_OUT)"
     fi
 }
 

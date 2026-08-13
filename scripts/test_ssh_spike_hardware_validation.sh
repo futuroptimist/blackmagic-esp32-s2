@@ -123,6 +123,69 @@ CHECK "connected, never authenticated, no recognized pattern -> unknown_failure 
     "unknown_failure" "$(classify_ssh_result "$t" 255)"
 
 echo
+echo "== channel_request_failed() / channel_open_failed() / advertised_auth_methods_excludes() =="
+
+t="$WORKDIR/t_execfail.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
+    'debug1: Sending command: not-a-real-command' \
+    'exec request failed on channel 0'
+if channel_request_failed "$t" "exec"; then r=0; else r=1; fi
+CHECK_TRUE "genuine 'exec request failed on channel' line is detected" "$r"
+if channel_request_failed "$t" "shell"; then r=1; else r=0; fi
+CHECK_TRUE "'exec request failed' does not also satisfy a 'shell' evidence check" "$r"
+
+t="$WORKDIR/t_execran.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
+    'some-command-that-was-actually-run-and-exited-nonzero'
+if channel_request_failed "$t" "exec"; then r=1; else r=0; fi
+CHECK_TRUE "a command that ran and merely exited non-zero (no refusal line) is NOT deceptively treated as a refusal" "$r"
+
+t="$WORKDIR/t_openfail.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
+    'channel 0: open failed: administratively prohibited: open failed'
+if channel_open_failed "$t"; then r=0; else r=1; fi
+CHECK_TRUE "genuine 'channel N: open failed' line is detected" "$r"
+if channel_request_failed "$t" "exec"; then r=1; else r=0; fi
+CHECK_TRUE "a channel-open failure does NOT also satisfy an exec channel-request evidence check" "$r"
+
+t="$WORKDIR/t_openaccepted_laterfail.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
+    'Connection closed by remote host'
+if channel_open_failed "$t"; then r=1; else r=0; fi
+CHECK_TRUE "an accepted channel whose destination later fails (no 'open failed' line) is NOT deceptively treated as a refusal" "$r"
+
+t="$WORKDIR/t_authmethods_excl.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'debug1: Authentications that can continue: publickey' \
+    'user@host: Permission denied (publickey).'
+if advertised_auth_methods_excludes "$t" "password" "keyboard-interactive"; then r=0; else r=1; fi
+CHECK_TRUE "advertised methods excluding password/keyboard-interactive is detected" "$r"
+
+t="$WORKDIR/t_authmethods_incl.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'debug1: Authentications that can continue: publickey,password' \
+    'user@host: Permission denied (publickey,password).'
+if advertised_auth_methods_excludes "$t" "password" "keyboard-interactive"; then r=1; else r=0; fi
+CHECK_TRUE "advertised methods that DO include password is correctly NOT reported as excluded" "$r"
+
+t="$WORKDIR/t_authmethods_missing.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'user@host: Permission denied (publickey).'
+if advertised_auth_methods_excludes "$t" "password" "keyboard-interactive"; then r=1; else r=0; fi
+CHECK_TRUE "a missing 'Authentications that can continue' line is inconclusive, not treated as excluded" "$r"
+
+echo
 echo "== class_in() =="
 
 if class_in "protocol_rejected" transport_failure protocol_rejected auth_rejected; then r=0; else r=1; fi
@@ -253,8 +316,177 @@ if grep -q -- "-W" "$WORKDIR/ssh_argv_capture.txt"; then r=0; else r=1; fi
 CHECK_TRUE "forwarding test invokes ssh with -W (a real server-reaching request)" "$r"
 if grep -q -- "-L" "$WORKDIR/ssh_argv_capture.txt"; then r=1; else r=0; fi
 CHECK_TRUE "forwarding test does NOT use the locally-invalid '-L ...:0...' form" "$r"
-CHECK "forwarding test: genuine protocol_rejected evidence -> recorded as PASS" "1" "$PASS_COUNT"
-CHECK "forwarding test: genuine protocol_rejected evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
+CHECK "forwarding test: genuine channel-open-failure evidence -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "forwarding test: genuine channel-open-failure evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
+
+echo
+echo "== deceptive-transcript regressions: generic protocol_rejected must not satisfy request-specific checks =="
+
+# Scenario (a): the board actually ACCEPTED the forwarding channel-open (no
+# "channel N: open failed" line) but the destination connection then failed
+# for an unrelated reason -- classify_ssh_result() still reports
+# protocol_rejected (authenticated, non-zero exit), but that must not be
+# mistaken for a rejected forwarding request.
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_FWD_ACCEPTED_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'Connection closed by remote host'
+exit 255
+FAKE_SSH_FWD_ACCEPTED_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_forwarding_rejected
+CHECK "forwarding accepted + destination failure later (no 'open failed' line) -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "forwarding accepted + destination failure later (no 'open failed' line) -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
+
+# Scenario (b): an accepted, executed command that merely exited non-zero --
+# no "exec request failed on channel" line -- must not pass
+# test_unknown_command_rejected().
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_EXEC_RAN_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'command-was-actually-run-and-exited-nonzero'
+exit 1
+FAKE_SSH_EXEC_RAN_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_unknown_command_rejected
+CHECK "unknown-command test: authenticated + executed + non-zero exit (no refusal line) -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "unknown-command test: authenticated + executed + non-zero exit (no refusal line) -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
+
+# Scenario (c): a genuine "exec request failed on channel" refusal DOES pass.
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_EXEC_REFUSED_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'exec request failed on channel 0'
+exit 255
+FAKE_SSH_EXEC_REFUSED_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_unknown_command_rejected
+CHECK "unknown-command test: genuine 'exec request failed on channel' evidence -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "unknown-command test: genuine 'exec request failed on channel' evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
+
+# Scenario (d): an abrupt post-auth close with no operation-specific marker
+# at all must not satisfy test_shell_rejected() or test_subsystem_rejected().
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_ABRUPT_CLOSE_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'Connection closed by remote host'
+exit 255
+FAKE_SSH_ABRUPT_CLOSE_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_shell_rejected
+CHECK "shell test: abrupt post-auth close with no 'shell request failed' marker -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "shell test: abrupt post-auth close with no 'shell request failed' marker -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+PATH="$FAKE_BIN:$PATH" test_subsystem_rejected
+CHECK "subsystem test: abrupt post-auth close with no 'subsystem request failed' marker -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "subsystem test: abrupt post-auth close with no 'subsystem request failed' marker -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
+
+# Scenario (e): genuine "shell"/"subsystem" refusals DO pass.
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_SHELL_REFUSED_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'shell request failed on channel 0'
+exit 255
+FAKE_SSH_SHELL_REFUSED_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_shell_rejected
+CHECK "shell test: genuine 'shell request failed on channel' evidence -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "shell test: genuine 'shell request failed on channel' evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_SUBSYS_REFUSED_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'subsystem request failed on channel 0'
+exit 255
+FAKE_SSH_SUBSYS_REFUSED_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_subsystem_rejected
+CHECK "subsystem test: genuine 'subsystem request failed on channel' evidence -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "subsystem test: genuine 'subsystem request failed on channel' evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
+
+# Scenario (f): test_pty_rejected() -- pty-req acknowledged (no "pty-req
+# request failed" line, by design), "ping" never serviced, exec refused ->
+# PASS. A deceptive transcript where "ping" WAS serviced (the exec callback
+# somehow let it through) must not pass despite protocol_rejected.
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<FAKE_SSH_PTY_REFUSED_EOF
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'exec request failed on channel 0'
+exit 255
+FAKE_SSH_PTY_REFUSED_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_pty_rejected
+CHECK "PTY test: pty-req acknowledged, subsequent 'exec request failed on channel', no pong -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "PTY test: pty-req acknowledged, subsequent 'exec request failed on channel', no pong -> no FAIL recorded" "0" "$FAIL_COUNT"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<FAKE_SSH_PTY_DECEPTIVE_EOF
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'Connection closed by remote host'
+exit 255
+FAKE_SSH_PTY_DECEPTIVE_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_pty_rejected
+CHECK "PTY test: abrupt post-auth close with no 'exec request failed' marker -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "PTY test: abrupt post-auth close with no 'exec request failed' marker -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
+
+echo
+echo "== test_password_rejected(): requires advertised-methods evidence, not just auth_rejected =="
+
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_PW_GENUINE_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'debug1: Authentications that can continue: publickey'
+echo 'user@127.0.0.1: Permission denied (publickey).'
+exit 255
+FAKE_SSH_PW_GENUINE_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_password_rejected
+CHECK "password test: advertised methods exclude password/keyboard-interactive -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "password test: advertised methods exclude password/keyboard-interactive -> no FAIL recorded" "0" "$FAIL_COUNT"
+
+# Deceptive: auth_rejected for some other reason, with no "Authentications
+# that can continue" evidence at all -- must not pass.
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_PW_NOEVIDENCE_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'user@127.0.0.1: Permission denied (publickey).'
+exit 255
+FAKE_SSH_PW_NOEVIDENCE_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_password_rejected
+CHECK "password test: auth_rejected with no advertised-methods evidence -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "password test: auth_rejected with no advertised-methods evidence -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
 
 echo
 echo "== test_second_connection_rejected(): requires a confirmed holder connection =="
