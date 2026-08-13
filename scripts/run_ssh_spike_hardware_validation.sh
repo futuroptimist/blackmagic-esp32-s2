@@ -1000,7 +1000,9 @@ EOF
      expect auth_rejected (server advertises publickey only).
   7. Unknown exec command -> expect protocol_rejected, no "pong" output.
   8. Shell request (no command) -> expect protocol_rejected.
-  9. PTY allocation (-tt) -> expect protocol_rejected, no "pong" output.
+  9. PTY'd exec (-tt) -> pty-req is acknowledged; the subsequent exec must
+     fail (protocol_rejected, "exec request failed on channel"), no "pong"
+     output.
   10. Subsystem request -> expect protocol_rejected.
   11. Port forwarding via -W (a real direct-tcpip channel-open request,
       not a locally-rejected -L specification) -> expect protocol_rejected.

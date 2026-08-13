@@ -607,6 +607,15 @@ rc=$?
 set -e
 CHECK "dry-run succeeds with a nonexistent identity file and an unroutable host" "0" "$rc"
 
+# The experimental --dry-run plan's PTY entry must describe the same
+# contract test_pty_rejected() actually enforces: pty-req is acknowledged,
+# and it is the *subsequent exec* that must fail -- not "PTY allocation"
+# itself. See docs/design/ssh-feasibility-spike.md sections 6-7.
+if grep -q "pty-req is acknowledged" "$WORKDIR/out_dryrun.log"; then r=0; else r=1; fi
+CHECK_TRUE "experimental dry-run plan states pty-req is acknowledged" "$r"
+if grep -q "PTY allocation (-tt) -> expect protocol_rejected" "$WORKDIR/out_dryrun.log"; then r=1; else r=0; fi
+CHECK_TRUE "experimental dry-run plan no longer claims 'PTY allocation ... expect protocol_rejected'" "$r"
+
 set +e
 "$VALIDATOR" --dry-run --mode default --host 203.0.113.1 > "$WORKDIR/out_dryrun_default.log" 2>&1
 rc=$?
