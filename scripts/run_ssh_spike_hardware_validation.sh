@@ -337,19 +337,34 @@ channel_request_failed() {
     grep -qE "^${request_type} request failed on channel [0-9]+\$" "$out_file"
 }
 
-# channel_open_failed <out_file>
+# channel_open_failed <out_file> <reason>
 #
-# True if the transcript contains OpenSSH's own "channel N: open failed:
-# ..." line. This is a *different* protocol message from
-# channel_request_failed() above: SSH_MSG_CHANNEL_OPEN_FAILURE (a whole new
-# channel refused), not SSH_MSG_CHANNEL_FAILURE (a request on an
-# already-open channel refused). This is the evidence a rejected `-W`
-# direct-tcpip request produces. A channel-open the board genuinely
-# accepted, whose later use happens to fail for an unrelated reason, will
-# not print this line.
+# True if the transcript contains OpenSSH's own
+# "channel N: open failed: <reason>: ..." line for a genuine
+# SSH_MSG_CHANNEL_OPEN_FAILURE carrying that specific RFC 4254 open-failure
+# reason, as ssh(1) itself renders it ("administratively prohibited",
+# "connect failed", "unknown channel type", or "resource shortage" --
+# confirmed via `strings` against the installed ssh(1) binary, which shows
+# "channel %d: open failed: %s%s%s" as the shared format string and those
+# four reason strings as literals). This is a *different* protocol message
+# from channel_request_failed() above: SSH_MSG_CHANNEL_OPEN_FAILURE (a whole
+# new channel refused), not SSH_MSG_CHANNEL_FAILURE (a request on an
+# already-open channel refused).
+#
+# The reason argument is required, not optional: OpenSSH renders BOTH a
+# genuine policy-level channel-open refusal and a server-side
+# destination-connect failure with the identical "channel N: open failed:"
+# prefix -- only the reason text (and the description that follows it)
+# distinguishes "the server's policy refused this channel" from "the server
+# accepted the channel-open and then failed to reach the requested
+# destination," which is not evidence of this spike's forwarding policy at
+# all. Confirmed live against a real, forwarding-enabled OpenSSH server
+# (`-W` to a destination whose port refuses connections) that the latter
+# case prints exactly "channel 0: open failed: connect failed: Connection
+# refused" -- a real SSH_MSG_CHANNEL_OPEN_FAILURE, but the wrong reason.
 channel_open_failed() {
-    local out_file="$1"
-    grep -qE '^channel [0-9]+: open failed:' "$out_file"
+    local out_file="$1" reason="$2"
+    grep -qE "^channel [0-9]+: open failed: ${reason}:" "$out_file"
 }
 
 # advertised_auth_methods_excludes <out_file> <method>...
@@ -661,21 +676,38 @@ test_forwarding_rejected() {
     # request to the server and use it for stdio -- unlike `-L ...:0...`,
     # which OpenSSH rejects locally as an invalid forwarding specification
     # before ever contacting the server (a local_invocation_failure, not
-    # evidence of anything the board did). A rejected -W request produces
-    # OpenSSH's well-known "channel N: open failed: ..." message once
-    # authenticated -- a genuine SSH_MSG_CHANNEL_OPEN_FAILURE, checked
-    # explicitly via channel_open_failed() so that a forwarding request the
-    # board *accepted*, whose destination connection then failed for some
-    # unrelated reason, cannot be mistaken for a rejected request merely
-    # because classify_ssh_result() also classifies that as
-    # protocol_rejected.
+    # evidence of anything the board did).
+    #
+    # This component compiles with WOLFSSH_FWD undefined (see
+    # components/wolfssh_spike/user_settings/user_settings.h), so the pinned
+    # wolfSSH's DoChannelOpen() (src/internal.c) never reaches its
+    # (compiled-out) ID_CHANTYPE_TCPIP_DIRECT case for a "direct-tcpip"
+    # channel-open request -- it falls to that switch's `default:` case,
+    # setting fail_reason = OPEN_UNKNOWN_CHANNEL_TYPE and description =
+    # "Channel type not supported.", which SendChannelOpenFail() sends as a
+    # genuine SSH_MSG_CHANNEL_OPEN_FAILURE. This is wolfSSH's own
+    # unknown-channel-type path rejecting the request before the
+    # application channel-open callback ever runs for it -- the callback
+    # (which also refuses a second channel on an active session) remains
+    # defense in depth should the set of compiled-in channel types ever
+    # change. On the client side this renders as
+    # "channel N: open failed: unknown channel type: Channel type not
+    # supported." -- checked explicitly via channel_open_failed() with that
+    # exact reason so that a forwarding request the board *accepted* (a
+    # channel-open with some other, or no, failure reason), whose
+    # destination connection then failed for an unrelated reason, cannot be
+    # mistaken for this spike's forwarding policy rejecting the request.
+    # (A real, forwarding-enabled OpenSSH server rejecting an unreachable
+    # destination instead prints "channel N: open failed: connect failed:
+    # ..." -- confirmed live -- which is a real SSH_MSG_CHANNEL_OPEN_FAILURE
+    # but the wrong reason, and correctly does not satisfy this check.)
     run_ssh "forwarding_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" \
         -W "127.0.0.1:$HTTP_PORT" --
     if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]] && \
-            channel_open_failed "$RUN_SSH_OUT"; then
-        pass "direct-tcpip channel-open (forwarding) request is rejected ('channel open failed', exit $RUN_SSH_RC)"
+            channel_open_failed "$RUN_SSH_OUT" "unknown channel type"; then
+        pass "direct-tcpip channel-open (forwarding) request is rejected ('open failed: unknown channel type', exit $RUN_SSH_RC)"
     else
-        fail "direct-tcpip channel-open request: expected a 'channel N: open failed' refusal, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED, was accepted and failed later for an unrelated reason, or the failure is inconclusive (see $RUN_SSH_OUT)"
+        fail "direct-tcpip channel-open request: expected a 'channel N: open failed: unknown channel type' refusal, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED, was accepted/refused for an unrelated reason (e.g. a destination-connect failure), or the failure is inconclusive (see $RUN_SSH_OUT)"
     fi
 }
 

@@ -144,23 +144,31 @@ write_transcript "$t" \
 if channel_request_failed "$t" "exec"; then r=1; else r=0; fi
 CHECK_TRUE "a command that ran and merely exited non-zero (no refusal line) is NOT deceptively treated as a refusal" "$r"
 
-t="$WORKDIR/t_openfail.out"
+t="$WORKDIR/t_openfail_unknowntype.out"
 write_transcript "$t" \
     'debug1: Connecting to host [1.2.3.4] port 2222.' \
     'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
-    'channel 0: open failed: administratively prohibited: open failed'
-if channel_open_failed "$t"; then r=0; else r=1; fi
-CHECK_TRUE "genuine 'channel N: open failed' line is detected" "$r"
+    'channel 0: open failed: unknown channel type: Channel type not supported.'
+if channel_open_failed "$t" "unknown channel type"; then r=0; else r=1; fi
+CHECK_TRUE "genuine 'channel N: open failed: unknown channel type' line is detected" "$r"
 if channel_request_failed "$t" "exec"; then r=1; else r=0; fi
 CHECK_TRUE "a channel-open failure does NOT also satisfy an exec channel-request evidence check" "$r"
+
+t="$WORKDIR/t_openfail_connectfailed.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
+    'channel 0: open failed: connect failed: Connection refused'
+if channel_open_failed "$t" "unknown channel type"; then r=1; else r=0; fi
+CHECK_TRUE "a genuine channel-open failure with an UNRELATED reason ('connect failed', a destination-connect failure) does NOT satisfy the 'unknown channel type' evidence check" "$r"
 
 t="$WORKDIR/t_openaccepted_laterfail.out"
 write_transcript "$t" \
     'debug1: Connecting to host [1.2.3.4] port 2222.' \
     'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
     'Connection closed by remote host'
-if channel_open_failed "$t"; then r=1; else r=0; fi
-CHECK_TRUE "an accepted channel whose destination later fails (no 'open failed' line) is NOT deceptively treated as a refusal" "$r"
+if channel_open_failed "$t" "unknown channel type"; then r=1; else r=0; fi
+CHECK_TRUE "an accepted channel whose destination later fails (no 'open failed' line at all) is NOT deceptively treated as a refusal" "$r"
 
 t="$WORKDIR/t_authmethods_excl.out"
 write_transcript "$t" \
@@ -305,7 +313,7 @@ cat > "$FAKE_BIN/ssh" <<FAKE_SSH_FWD_EOF
 printf '%s\n' "\$@" > "$WORKDIR/ssh_argv_capture.txt"
 echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
 echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
-echo 'channel 0: open failed: administratively prohibited: open failed'
+echo 'channel 0: open failed: unknown channel type: Channel type not supported.'
 exit 255
 FAKE_SSH_FWD_EOF
 chmod +x "$FAKE_BIN/ssh"
@@ -316,15 +324,15 @@ if grep -q -- "-W" "$WORKDIR/ssh_argv_capture.txt"; then r=0; else r=1; fi
 CHECK_TRUE "forwarding test invokes ssh with -W (a real server-reaching request)" "$r"
 if grep -q -- "-L" "$WORKDIR/ssh_argv_capture.txt"; then r=1; else r=0; fi
 CHECK_TRUE "forwarding test does NOT use the locally-invalid '-L ...:0...' form" "$r"
-CHECK "forwarding test: genuine channel-open-failure evidence -> recorded as PASS" "1" "$PASS_COUNT"
-CHECK "forwarding test: genuine channel-open-failure evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
+CHECK "forwarding test: genuine 'unknown channel type' evidence -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "forwarding test: genuine 'unknown channel type' evidence -> no FAIL recorded" "0" "$FAIL_COUNT"
 
 echo
 echo "== deceptive-transcript regressions: generic protocol_rejected must not satisfy request-specific checks =="
 
 # Scenario (a): the board actually ACCEPTED the forwarding channel-open (no
-# "channel N: open failed" line) but the destination connection then failed
-# for an unrelated reason -- classify_ssh_result() still reports
+# "channel N: open failed" line at all) but the destination connection then
+# failed for an unrelated reason -- classify_ssh_result() still reports
 # protocol_rejected (authenticated, non-zero exit), but that must not be
 # mistaken for a rejected forwarding request.
 PASS_COUNT=0
@@ -340,6 +348,28 @@ chmod +x "$FAKE_BIN/ssh"
 PATH="$FAKE_BIN:$PATH" test_forwarding_rejected
 CHECK "forwarding accepted + destination failure later (no 'open failed' line) -> NOT recorded as PASS" "0" "$PASS_COUNT"
 CHECK "forwarding accepted + destination failure later (no 'open failed' line) -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
+
+# Scenario (a'): the sharpest deceptive case -- a REAL
+# SSH_MSG_CHANNEL_OPEN_FAILURE genuinely occurred (the board's forwarding
+# target refused the destination connection, "connect failed"), but that is
+# not evidence of THIS spike's forwarding policy rejecting the request: with
+# WOLFSSH_FWD undefined, this spike's own rejection always carries the
+# "unknown channel type" reason (see test_forwarding_rejected()'s comment).
+# A naive "any channel N: open failed line" predicate would have wrongly
+# passed this.
+PASS_COUNT=0
+FAIL_COUNT=0
+cat > "$FAKE_BIN/ssh" <<'FAKE_SSH_FWD_CONNECTFAILED_EOF'
+#!/usr/bin/env bash
+echo 'debug1: Connecting to 127.0.0.1 [127.0.0.1] port 2222.'
+echo 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".'
+echo 'channel 0: open failed: connect failed: Connection refused'
+exit 255
+FAKE_SSH_FWD_CONNECTFAILED_EOF
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH" test_forwarding_rejected
+CHECK "forwarding: genuine channel-open failure with the WRONG reason ('connect failed') -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "forwarding: genuine channel-open failure with the WRONG reason ('connect failed') -> recorded as FAIL (inconclusive)" "1" "$FAIL_COUNT"
 
 # Scenario (b): an accepted, executed command that merely exited non-zero --
 # no "exec request failed on channel" line -- must not pass

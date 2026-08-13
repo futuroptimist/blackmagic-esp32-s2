@@ -204,11 +204,17 @@ registers a callback that:
 *exposes a callback for* (`shell`, `exec`, `subsystem`, channel-open) is
 explicitly registered, not left unset. wolfSSH's own channel-request
 dispatcher (`DoChannelRequest()`, pinned `src/internal.c`) additionally
-handles a few request types — `env`, `pty-req`, `window-change`,
-`exit-status`, `exit-signal`, agent-forwarding — with no corresponding
-application callback at all; see the `env`/unknown-request bullet in
-[§7](#7-threat-and-safety-boundaries) for exactly what that means and
-does not mean.
+handles a few request types with no corresponding application callback to
+reject them, but not all identically: `env`, `window-change`, `exit-status`,
+`exit-signal`, and agent-forwarding are true no-ops — parsed and discarded
+(or, for `env`, logged at debug level) with no lasting effect on connection
+state. `pty-req` is different: it has its own dedicated parsing branch,
+compiled in because `WOLFSSH_TERM` is required for `wolfSSH_ChannelIsPty()`
+(see `user_settings.h`), that stores real per-connection protocol state
+before acknowledging the request. See the `env`/unknown-request bullet in
+[§7](#7-threat-and-safety-boundaries) for the true no-op case, and the
+`pty-req` bullet below for what is actually stored and why that still does
+not amount to PTY access.
 - `wolfSSH_CTX_SetChannelOpenCb` — allow only a `session` channel type; a
   `direct-tcpip`/forwarded-channel open request is rejected here before any
   request callback runs (this is also how forwarding is refused even though
@@ -230,15 +236,23 @@ does not mean.
   — both registered as unconditional-reject callbacks. Neither a `shell`
   channel request nor any named subsystem (which would include a hypothetical
   `sftp` subsystem) succeeds.
-- A `pty-req` is protocol-acknowledged, not rejected: it is one of the
-  request types with no application callback described above, so it falls
-  through wolfSSH's dispatcher the same way an `env` request does — logged,
-  never stored, acknowledged to the client as successful. That
-  acknowledgment grants nothing on its own; the actual boundary is one level
-  later, at the exec callback: `wolfSSH_ChannelIsPty()` rejects any exec
-  request made on a PTY-allocated channel (`channel_req_exec_cb()`,
+- A `pty-req` is protocol-acknowledged, not rejected — but unlike a true
+  no-op (`env`, an unknown request type), it is not silently discarded.
+  wolfSSH's dispatcher (`DoChannelRequest()`, pinned `src/internal.c`) has
+  its own dedicated `pty-req` branch that sets `channel->ptyReq = 1` and
+  stores the negotiated terminal dimensions and modes as real
+  per-connection protocol state — compiled in because `WOLFSSH_TERM` is
+  required for `wolfSSH_ChannelIsPty()`, which this spike's exec callback
+  depends on (see `user_settings.h`). No application callback exists to
+  reject a `pty-req` itself, and none of that stored state creates an
+  OS-level PTY device or terminal session on this target: there is no
+  shell, no terminal emulation, and the only code that ever reads the
+  stored request is the boolean accessor `wolfSSH_ChannelIsPty()`. The
+  actual security boundary is one level later, at the exec callback:
+  `wolfSSH_ChannelIsPty()` rejects any exec request on a channel where a
+  `pty-req` was recorded (`channel_req_exec_cb()`,
   `components/wolfssh_spike/wolfssh_spike.c`), so no command — supported or
-  not — is ever serviced through an allocated PTY.
+  not — is ever serviced through it.
 
 **Build-time key injection.** Two external inputs are required when the
 feature is enabled, both supplied out-of-tree:
@@ -374,13 +388,14 @@ client                          ESP32-S2 (wolfssh_spike task)
   which is a wolfSSH library behavior this spike does not alter — patching
   or forking the pinned wolfSSH source to change that reply semantics is
   explicitly out of scope for this feasibility spike. The practical
-  consequence is: `env` and unknown requests — and `pty-req`, which the
-  dispatcher handles the same way — are harmless no-ops, not
+  consequence is: `env` and unknown requests are harmless no-ops, not
   attacker-controlled behavior, but they are not "rejected" in the same
   sense as `shell`/second-exec/unsupported-command, which this spike's own
-  callbacks actively refuse. (A PTY-allocated channel is still denied
-  everything that matters: the exec callback refuses to service any command
-  on it — see [§6](#6-prototype-architecture).)
+  callbacks actively refuse. `pty-req` is acknowledged the same way but is
+  *not* a no-op like these — see the `pty-req` bullet in
+  [§6](#6-prototype-architecture) for what it actually stores and why that
+  still does not amount to PTY access: the exec callback refuses to
+  service any command on a channel where one was recorded.
 - **Station-mode/private-network use only.** The listener binds `INADDR_ANY`
   on the station interface's network the same way the existing GDB/UART
   listeners do; nothing in this spike exposes SSH differently than those
