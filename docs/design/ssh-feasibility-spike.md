@@ -395,8 +395,8 @@ client                          ESP32-S2 (wolfssh_spike task)
 | Largest free internal block, sampled at each checkpoint above | Pending hardware measurement | `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` |
 | Task stack high-water mark, sampled at each checkpoint above | Pending hardware measurement | `uxTaskGetStackHighWaterMark()` |
 | Handshake+authentication duration, logged on both success and failure | Pending hardware measurement | FreeRTOS tick-count delta around the complete `wolfSSH_accept()` retry loop, logged as `handshake_auth_duration_ms` |
-| Repeated successful/failed connection behavior (target 100 cycles) | Pending hardware measurement | see operator checklist in the PR description |
-| macOS OpenSSH interoperability | Pending hardware measurement | `ssh -p 2222 -i <key> flipper@<board-ip> ping` |
+| Repeated successful/failed connection behavior (target 100 cycles) | Pending hardware measurement | `scripts/run_ssh_spike_hardware_validation.sh --mode experimental ... --cycles 100`, soak phase |
+| macOS OpenSSH interoperability, algorithm negotiation, and every fail-closed rejection case | Pending hardware measurement | same script, non-soak phases (see "Hardware validation procedure" below) |
 
 Checkpoint labels, in the order they can fire, and their exact code
 position: `before_ssh_init` (start of `wolfssh_spike_start()`, before
@@ -423,6 +423,99 @@ version can shift object layout by a handful of bytes between runs on
 different machines, so treat them as representative rather than bit-for-bit
 invariant across every environment.
 
+### Hardware validation procedure
+
+`scripts/run_ssh_spike_hardware_validation.sh` is a host-side, fail-closed
+runner that drives a real board with the standard OpenSSH client and common
+Unix tools (`ssh`, `ssh-keygen`, `ssh-keyscan`; `nc` and `curl` if present).
+It does not flash the board or capture the serial console itself — those
+remain separate manual steps below — and it never embeds, copies, or prints
+private-key material; the developer identity file is only ever passed by
+path to `ssh -i`. Run `--help` for the full flag reference, or `--dry-run`
+to see the exact planned phase order and validate arguments with no
+network, hardware, or real key files touched at all.
+
+**Prerequisites** (all manual, not automated by the script):
+1. A Flipper Zero Wi-Fi Board reachable over the operator's local network,
+   with its IP address or `.local` hostname known.
+2. `scripts/gen_ssh_spike_keys.sh` run to produce a host key and an
+   authorized developer key pair, and the experimental firmware built and
+   flashed with `WOLFSSH_SPIKE_HOST_KEY_PATH`/
+   `WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH` pointed at them (see AGENTS.md and
+   [§6](#6-prototype-architecture)).
+3. The expected host-key fingerprint, computed once locally right after key
+   generation: `ssh-keygen -lf <embedded_host_key.pem-derived public key>`
+   (or read it back from the device's own serial log at boot, if the
+   firmware ever logs it — check before assuming). This value is what
+   `--host-key-fingerprint` pins against; the script refuses to proceed at
+   all if the board's actual host key doesn't match it, rather than
+   trust-on-first-use blindly accepting whatever key the board presents.
+4. Optionally, a serial monitor capture (`idf.py monitor` output redirected
+   to a file, or any equivalent capture) taken while the script's
+   experimental-mode phases run, to pass as `--monitor-log` afterward.
+
+**Invocation order:**
+```console
+# 1. With the DEFAULT (SSH-disabled) firmware flashed:
+scripts/run_ssh_spike_hardware_validation.sh --mode default --host flipper.local
+
+# 2. Flash the EXPERIMENTAL firmware, then:
+scripts/run_ssh_spike_hardware_validation.sh --mode experimental \
+    --host flipper.local --user flipper \
+    --identity <path to the developer private key from gen_ssh_spike_keys.sh> \
+    --host-key-fingerprint <fingerprint from prerequisite 3> \
+    --cycles 100 \
+    --monitor-log <path to a serial capture taken during this run, if available> \
+    --evidence-dir <a directory to keep the transcripts/summaries in>
+```
+
+**Pass/fail interpretation:** the script prints a `PASS`/`FAIL`/`SKIP` line
+per check and a final `SUMMARY: pass=N fail=N skip=N` line, exiting `0`
+only if `fail=0`. `SKIP` means a prerequisite tool or input was missing
+(e.g. no `nc`, no `--monitor-log`), not that the behavior was verified —
+treat a run with skips as incomplete evidence, not a clean pass, and note
+which checks were skipped and why when recording results. Any single
+`FAIL` is a real go/no-go blocker for this spike (see
+[§9](#9-go-no-go-criteria)) and should stop before promoting past this
+draft-review state, not just get noted and ignored.
+
+What each mode's phases map back to in this document and in
+[§7](#7-threat-and-safety-boundaries):
+- `--mode default`: confirms port 2222 is not exposed at all.
+- `--mode experimental`: host-key fingerprint pinning; `ping` → exact
+  `pong` + exit 0; negotiated kex/host-key/cipher algorithms match the
+  restricted P-256/AES-256-GCM profile; unrecognized key, unknown username,
+  and password/keyboard-interactive auth are all rejected; unsupported exec
+  command, shell request, PTY allocation, subsystem request, and TCP
+  forwarding are all rejected; a second simultaneous connection is rejected
+  while the first is active and a subsequent reconnect succeeds; best-effort
+  HTTP/GDB/UART coexistence reachability probes; a configurable soak phase
+  (default 100 cycles) of alternating successful/expected-failure
+  connections; and, if `--monitor-log` was given, an extracted summary of
+  the checkpoint/heap/handshake-duration `ESP_LOGI` lines described above.
+
+**Manual-only phases**, not automated by this script, still required before
+marking [§9](#9-go-no-go-criteria)'s hardware-dependent items complete:
+- Flashing the default and experimental firmware images themselves.
+- Capturing the serial console (for `--monitor-log` and for confirming the
+  `ESP_LOGI` checkpoint lines actually appear as expected).
+- Exercising the HTTP landing page and `/config` Svelte UI interactively in
+  a browser, and confirming existing Blackmagic/GDB debugging and USB CLI
+  behavior, beyond this script's bare TCP-reachability probes for those
+  services.
+- Simulating Wi-Fi loss and recovery (e.g. disabling the AP briefly) and
+  confirming the SSH task neither wedges nor leaks across the outage.
+
+**Evidence fields maintainers must record** (in this table, replacing the
+`Pending hardware measurement` placeholders, and/or by attaching the
+script's `--evidence-dir` output to the PR): the script's final
+pass/fail/skip summary and exit code; per-check transcripts for any `FAIL`;
+the `soak_summary.txt` cycle counts; and, from `--monitor-log`, the actual
+numeric heap/largest-free-block/stack-watermark/handshake-duration values
+pulled from the device's own `ESP_LOGI` output — the script summarizes and
+locates these lines for convenience, but the numbers themselves come from
+the board, not from this script's own observation.
+
 ## 9. Go/no-go criteria
 
 - [x] Default build and behavior remain unchanged (verified: 964,432-byte
@@ -438,15 +531,26 @@ invariant across every environment.
       directory outside the repo, never staged; `git status` confirms no
       key-bearing files are tracked).
 - [ ] Current macOS OpenSSH can authenticate and execute the supported
-      `ping` command. **Pending hardware measurement.**
+      `ping` command. **Pending hardware measurement** — run
+      `scripts/run_ssh_spike_hardware_validation.sh --mode experimental`
+      (see "Hardware validation procedure" above) and record its
+      `ping_success`/`algorithms` results here.
 - [ ] Unsupported functionality (shell, PTY, subsystems, forwarding,
       password auth, unknown user/key/command, second connection) fails
-      closed. **Pending hardware measurement for behavioral confirmation**;
-      architecturally guaranteed per [§7](#7-threat-and-safety-boundaries).
+      closed. **Pending hardware measurement for behavioral confirmation**
+      via the same script's rejection-case checks; architecturally
+      guaranteed per [§7](#7-threat-and-safety-boundaries).
 - [ ] Existing HTTP/`/config`/GDB/UART/USB CLI/mDNS services still work
-      with the experimental build flashed. **Pending hardware measurement.**
+      with the experimental build flashed. **Pending hardware
+      measurement** — the script's coexistence probes cover bare
+      HTTP/GDB/UART TCP reachability only; the Svelte `/config` UI, USB
+      CLI, and Blackmagic debugging still need the manual phases described
+      above.
 - [ ] No obvious leak or degradation during repeated connection cycles.
-      **Pending hardware measurement.**
+      **Pending hardware measurement** — run the same script's soak phase
+      (`--cycles 100`) paired with `--monitor-log` from a serial capture
+      taken over the same run, and record the resulting heap/stack
+      trend here.
 - [x] Production remains explicitly no-go until the Phase 1+ items below
       (key lifecycle, enrollment, hardening, ESP-IDF support) are addressed.
 
