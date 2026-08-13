@@ -179,9 +179,9 @@ A first reproducible spike against these criteria is recorded in
 [`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md): wolfSSH/wolfSSL,
 pinned to specific tagged releases, built as a disabled-by-default prototype
 that authenticates one public key and answers one exec command. That
-document is the decision record for this open item; treat it as the current
-source of truth for dependency versions, licensing conclusions, and measured
-(or pending) resource costs.
+document is the completed decision record for the library choice; treat it
+as the current source of truth for dependency versions, licensing
+conclusions, and measured (or pending) resource costs.
 
 ## Runtime and failure behavior
 
