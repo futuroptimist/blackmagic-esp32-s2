@@ -433,7 +433,12 @@ remain separate manual steps below — and it never embeds, copies, or prints
 private-key material; the developer identity file is only ever passed by
 path to `ssh -i`. Run `--help` for the full flag reference, or `--dry-run`
 to see the exact planned phase order and validate arguments with no
-network, hardware, or real key files touched at all.
+network, hardware, or real key files touched at all. The runner's own
+classification logic (telling genuine protocol/auth rejection apart from
+an unreachable board, a timeout, or a local argument error) is covered by
+`scripts/test_ssh_spike_hardware_validation.sh`, a CI-run regression suite
+against canned transcripts and PATH-injected fake tools — no real network
+or board involved there either.
 
 **Prerequisites** (all manual, not automated by the script):
 1. A Flipper Zero Wi-Fi Board reachable over the operator's local network,
@@ -470,29 +475,54 @@ scripts/run_ssh_spike_hardware_validation.sh --mode experimental \
 ```
 
 **Pass/fail interpretation:** the script prints a `PASS`/`FAIL`/`SKIP` line
-per check and a final `SUMMARY: pass=N fail=N skip=N` line, exiting `0`
-only if `fail=0`. `SKIP` means a prerequisite tool or input was missing
-(e.g. no `nc`, no `--monitor-log`), not that the behavior was verified —
-treat a run with skips as incomplete evidence, not a clean pass, and note
-which checks were skipped and why when recording results. Any single
-`FAIL` is a real go/no-go blocker for this spike (see
-[§9](#9-go-no-go-criteria)) and should stop before promoting past this
-draft-review state, not just get noted and ignored.
+per check and a final `SUMMARY: pass=N fail=N skip=N required_skip=N` line.
+It exits non-zero if `fail>0`, and also if `required_skip>0` (a
+prerequisite tool for a check the script's contract says it performs was
+missing) unless `--allow-incomplete-evidence` was explicitly given — a
+required check being skipped is incomplete evidence, not a clean pass, and
+the script refuses to let that silently satisfy the merge gate. Optional
+skips (`--skip-coexistence`, `--cycles 0`, no `--monitor-log`) do not count
+as required and never block the exit status. Any `FAIL` is a real go/no-go
+blocker for this spike (see [§9](#9-go-no-go-criteria)) and should stop
+before promoting past this draft-review state, not just get noted and
+ignored.
+
+Every negative check classifies the underlying `ssh -v` transcript rather
+than treating "non-zero exit" as proof of rejection — an unreachable board,
+a DNS failure, a stale host key, a bad local `ssh` argument, and a timeout
+are all non-zero exits that are *not* evidence the board rejected anything,
+and the classifier (`classify_ssh_result()`, unit tested in
+`scripts/test_ssh_spike_hardware_validation.sh`) distinguishes all of them
+from genuine `auth_rejected`/`protocol_rejected` outcomes before a check is
+allowed to PASS.
 
 What each mode's phases map back to in this document and in
 [§7](#7-threat-and-safety-boundaries):
-- `--mode default`: confirms port 2222 is not exposed at all.
+- `--mode default`: first confirms the board is reachable and identifiable
+  at all (via HTTP `/api/v1/system/ping`) — an offline/unreachable board
+  must never be reported as "SSH correctly disabled" — then confirms port
+  2222 is not exposed.
 - `--mode experimental`: host-key fingerprint pinning; `ping` → exact
   `pong` + exit 0; negotiated kex/host-key/cipher algorithms match the
   restricted P-256/AES-256-GCM profile; unrecognized key, unknown username,
-  and password/keyboard-interactive auth are all rejected; unsupported exec
-  command, shell request, PTY allocation, subsystem request, and TCP
-  forwarding are all rejected; a second simultaneous connection is rejected
-  while the first is active and a subsequent reconnect succeeds; best-effort
-  HTTP/GDB/UART coexistence reachability probes; a configurable soak phase
-  (default 100 cycles) of alternating successful/expected-failure
-  connections; and, if `--monitor-log` was given, an extracted summary of
-  the checkpoint/heap/handshake-duration `ESP_LOGI` lines described above.
+  and password/keyboard-interactive auth are all confirmed `auth_rejected`;
+  unsupported exec command, shell request, PTY allocation, and subsystem
+  request are all confirmed `protocol_rejected` (authentication succeeded,
+  the specific request did not); TCP forwarding is probed with `ssh -W`
+  (a real direct-tcpip channel-open request the server must answer) rather
+  than a `-L ...:0...` specification, which OpenSSH rejects locally before
+  ever contacting the board and would prove nothing; a second simultaneous
+  connection is only attempted after independently confirming (via `nc -v`)
+  that the held first connection actually connected, and is then required
+  to fail as `transport_failure`/`protocol_rejected`/`auth_rejected` (the
+  board's accept-then-immediately-close design looks like an early close,
+  not a post-auth refusal, from the client's point of view) before a
+  subsequent reconnect is checked to succeed; best-effort HTTP/GDB/UART
+  coexistence reachability probes; a configurable soak phase (default 100
+  cycles) requiring every successful-ping leg to classify as `success` and
+  every wrong-key leg to classify as `auth_rejected`; and, if
+  `--monitor-log` was given, an extracted summary of the
+  checkpoint/heap/handshake-duration `ESP_LOGI` lines described above.
 
 **Manual-only phases**, not automated by this script, still required before
 marking [§9](#9-go-no-go-criteria)'s hardware-dependent items complete:

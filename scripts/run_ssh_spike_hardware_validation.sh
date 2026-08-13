@@ -6,8 +6,20 @@
 # This script is host-side only: it drives a real board over the network
 # with the standard OpenSSH client and a handful of common Unix tools. It
 # does not flash, monitor a serial port, or claim any result it did not
-# itself observe. Every check is either PASS, FAIL, or SKIP (prerequisite
-# tool/log not available); any FAIL makes the whole run exit non-zero.
+# itself observe. Every check is either PASS, FAIL, or SKIP; any FAIL makes
+# the whole run exit non-zero. A SKIP of a *required* check (a prerequisite
+# tool was missing) also makes the run exit non-zero unless
+# --allow-incomplete-evidence is given -- a skipped required check is
+# incomplete evidence, not proof the board behaved correctly, and must not
+# silently satisfy the merge gate.
+#
+# Negative checks do not equate "the ssh command exited non-zero" with "the
+# board rejected the request": that conflates genuine protocol/auth
+# rejection with DNS failures, an unreachable/offline board, local argument
+# errors, and timeouts, any of which would otherwise let a broken or
+# offline board falsely "pass" every rejection check. See
+# classify_ssh_result() below -- it is unit tested in
+# scripts/test_ssh_spike_hardware_validation.sh.
 #
 # Usage:
 #   run_ssh_spike_hardware_validation.sh --mode default --host <ip>
@@ -41,6 +53,7 @@ MONITOR_LOG=""
 EVIDENCE_DIR=""
 DRY_RUN=0
 SKIP_COEXISTENCE=0
+ALLOW_INCOMPLETE=0
 CONNECT_TIMEOUT=5
 HOLD_SECONDS=5
 COMMAND_TIMEOUT=15
@@ -54,6 +67,7 @@ EXPECTED_PING_EXIT=0
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
+REQUIRED_SKIP_COUNT=0
 
 usage() {
     cat <<'EOF'
@@ -79,7 +93,10 @@ Required for --mode experimental (unless --dry-run):
 
 Optional:
   --port <n>                      SSH port (default: 2222).
-  --http-port <n>                 HTTP port for coexistence probes (default: 80).
+  --http-port <n>                 HTTP port, also used to confirm the board
+                                   is actually reachable in --mode default
+                                   before trusting a closed port 2222
+                                   (default: 80).
   --gdb-port <n>                  GDB TCP port for coexistence probes (default: 2345).
   --uart-port <n>                 Raw UART TCP port for coexistence probes (default: 3456).
   --cycles <n>                    Soak-phase cycle count (default: 100).
@@ -91,15 +108,26 @@ Optional:
   --connect-timeout <seconds>      Per-attempt SSH connect timeout (default: 5).
   --hold-seconds <seconds>         How long the concurrent-connection probe
                                    holds a raw TCP connection open (default: 5).
-  --skip-coexistence               Skip HTTP/GDB/UART coexistence probes.
+  --skip-coexistence               Skip HTTP/GDB/UART coexistence probes
+                                   (these are already best-effort and never
+                                   count as "required" -- see below).
+  --allow-incomplete-evidence       Let a run with skipped *required* checks
+                                   (a prerequisite tool was missing) still
+                                   exit 0. Off by default: such a run cannot
+                                   satisfy the merge gate, and this flag is
+                                   for diagnostic/development use only, not
+                                   for producing the recorded hardware
+                                   evidence.
   --dry-run                        Validate arguments and print the planned
                                    phase order; no network/hardware access,
                                    no real key files required.
   -h, --help                       Show this help and exit.
 
-Exit status: 0 only if every executed check PASSed (SKIPs are reported but
-do not fail the run by themselves -- they mean a prerequisite tool or input
-was unavailable, not that the behavior was verified).
+Exit status: 0 only if every executed check PASSed AND no *required* check
+was SKIPped (unless --allow-incomplete-evidence was given). Optional
+checks (coexistence probes, the monitor-log summary) can be skipped
+without affecting the exit status -- they are opt-in extras, not part of
+the merge-gate evidence.
 EOF
 }
 
@@ -107,6 +135,15 @@ log()   { printf '[%s] %s\n' "$PROG" "$*" >&2; }
 pass()  { PASS_COUNT=$((PASS_COUNT + 1)); log "PASS: $*"; }
 fail()  { FAIL_COUNT=$((FAIL_COUNT + 1)); log "FAIL: $*"; }
 skip()  { SKIP_COUNT=$((SKIP_COUNT + 1)); log "SKIP: $*"; }
+# A skip caused by a missing prerequisite tool for a check this script's
+# contract says it performs -- as opposed to a deliberately opted-out
+# optional phase (--skip-coexistence, --cycles 0, no --monitor-log given).
+# See --allow-incomplete-evidence above.
+skip_required() {
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    REQUIRED_SKIP_COUNT=$((REQUIRED_SKIP_COUNT + 1))
+    log "SKIP (required): $*"
+}
 
 # `timeout` is a GNU coreutils command, not a standard macOS/BSD one --
 # Homebrew's coreutils installs it as `gtimeout` to avoid clobbering the
@@ -115,7 +152,10 @@ skip()  { SKIP_COUNT=$((SKIP_COUNT + 1)); log "SKIP: $*"; }
 # Prefer a real timeout binary when available (more precise: it kills the
 # whole process group), otherwise fall back to a portable background-job
 # watchdog so this script has no hard external dependency beyond `ssh`
-# itself and common Unix tools.
+# itself and common Unix tools. Both paths return 124 specifically when the
+# command was killed for running past its deadline (GNU timeout's own
+# convention), so callers can distinguish "timed out" from any other
+# failure without inspecting which path was taken.
 if command -v timeout >/dev/null 2>&1; then
     TIMEOUT_BIN="timeout"
 elif command -v gtimeout >/dev/null 2>&1; then
@@ -131,16 +171,610 @@ run_with_timeout() {
         "$TIMEOUT_BIN" "$secs" "$@"
         return $?
     fi
+    local sentinel
+    sentinel="$(mktemp "${TMPDIR:-/tmp}/timeout_sentinel.XXXXXX")"
+    rm -f "$sentinel"
     "$@" &
     local cmd_pid=$!
-    ( sleep "$secs" 2>/dev/null; kill -TERM "$cmd_pid" 2>/dev/null ) &
+    (
+        sleep "$secs" 2>/dev/null
+        if kill -0 "$cmd_pid" 2>/dev/null; then
+            : > "$sentinel"
+            kill -TERM "$cmd_pid" 2>/dev/null
+        fi
+    ) &
     local watchdog_pid=$!
     local rc=0
     wait "$cmd_pid" 2>/dev/null || rc=$?
     kill "$watchdog_pid" 2>/dev/null || true
     wait "$watchdog_pid" 2>/dev/null || true
+    if [[ -e "$sentinel" ]]; then
+        rm -f "$sentinel"
+        return 124
+    fi
     return "$rc"
 }
+
+# ---- SSH outcome classification --------------------------------------------
+#
+# Every negative check below needs to tell "the board's SSH server actively
+# rejected this request" apart from "something else entirely prevented the
+# request from ever reaching the board" -- an unreachable board, a DNS
+# failure, a bad local ssh(1) argument, a stale host key, or a timeout would
+# otherwise all look like "non-zero exit" and falsely satisfy a naive
+# rejection check. classify_ssh_result() reads a captured `ssh -v` (or more
+# verbose) transcript plus the exit status and returns exactly one of:
+#
+#   success              -- exit 0.
+#   auth_rejected         -- OpenSSH printed its standard denial ("Permission
+#                            denied", "No more authentication methods").
+#   host_key_failure      -- host key verification failed (should not occur
+#                            here since the fingerprint is pinned earlier,
+#                            but if it does, that's a distinct anomaly, not
+#                            evidence of anything this script is testing).
+#   protocol_rejected      -- the client got past authentication
+#                            ("Authenticated to ... using" is present) but
+#                            the connection still ended in failure -- the
+#                            expected shape for the board rejecting a
+#                            specific channel/exec/pty/subsystem/forwarding
+#                            request, or immediately closing a second
+#                            connection while one is already active.
+#   timeout                -- run_with_timeout's watchdog had to kill it
+#                            (rc 124); ambiguous on its own and never
+#                            treated as proof of rejection.
+#   transport_failure      -- connection-establishment failed before any
+#                            protocol/auth exchange (refused, timed out, no
+#                            route, DNS failure, network unreachable, or an
+#                            unexplained close/reset before authentication).
+#   local_invocation_failure -- ssh(1) never even attempted a network
+#                            connection (no "Connecting to" line at all) --
+#                            almost always a bad argument to this script's
+#                            own ssh invocation, not board behavior.
+#   unknown_failure         -- non-zero exit that matched none of the above;
+#                            never treated as valid rejection evidence.
+#
+# This function is exercised directly by
+# scripts/test_ssh_spike_hardware_validation.sh using canned transcripts, so
+# treat its output contract (the exact class strings above) as stable.
+classify_ssh_result() {
+    local out_file="$1" rc="$2"
+
+    if [[ "$rc" -eq 124 ]]; then
+        printf '%s' "timeout"
+        return
+    fi
+    if [[ ! -f "$out_file" ]]; then
+        printf '%s' "unknown_failure"
+        return
+    fi
+    if grep -qE 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|no matching host key type found' "$out_file"; then
+        printf '%s' "host_key_failure"
+        return
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        printf '%s' "success"
+        return
+    fi
+    if grep -qE 'Authenticated to .* using' "$out_file"; then
+        # Authentication is confirmed to have succeeded -- whatever ended
+        # the connection after that point is the board (or this script's
+        # own SSH request) being refused at the protocol level, not a
+        # transport-layer problem. This ordering matters: a post-auth
+        # abrupt close can print the same "Connection closed"/"reset by
+        # peer" text a genuine pre-auth transport failure would, so
+        # "Authenticated to" must be checked before those patterns below.
+        printf '%s' "protocol_rejected"
+        return
+    fi
+    if grep -qE 'Permission denied|No more authentication methods to try|No supported authentication methods' "$out_file"; then
+        printf '%s' "auth_rejected"
+        return
+    fi
+    if grep -qE 'Connection refused|Connection timed out|Operation timed out|No route to host|Network is unreachable|Could not resolve hostname|Connection closed by remote host|Connection reset by peer|kex_exchange_identification' "$out_file"; then
+        printf '%s' "transport_failure"
+        return
+    fi
+    if ! grep -qE 'Connecting to .* port [0-9]+\.' "$out_file"; then
+        printf '%s' "local_invocation_failure"
+        return
+    fi
+    printf '%s' "unknown_failure"
+}
+
+# True if $1 (a class from classify_ssh_result) is one of the remaining
+# arguments.
+class_in() {
+    local needle="$1"; shift
+    local c
+    for c in "$@"; do
+        [[ "$needle" == "$c" ]] && return 0
+    done
+    return 1
+}
+
+# Isolates the actual remote-command output line from an `ssh -v` capture:
+# strips ssh(1)'s own "debug1:"/"debug2:"/"debug3:" lines plus the
+# unprefixed "Transferred: ..."/"Bytes per second: ..." summary `-v` prints
+# after the command finishes, then returns the last remaining line.
+extract_last_output_line() {
+    grep -vE '^debug[0-9]?:|^Transferred:|^Bytes per second:' "$1" 2>/dev/null | tail -1
+}
+
+# Plain array assignment rather than a function-that-prints-lines-captured-
+# with-mapfile: `mapfile`/`readarray` need bash 4+, but macOS ships bash 3.2
+# at /bin/bash by default, and this script otherwise has no bash-version
+# requirement worth imposing. Call build_ssh_common_opts() once argument
+# parsing/validation has finished and $KNOWN_HOSTS exists; every helper
+# below just reads the SSH_COMMON_OPTS array it fills in. `-v` is included
+# unconditionally: classify_ssh_result() needs its "Connecting to"/
+# "Authenticated to" evidence, and it is the setting each pattern above was
+# empirically captured against.
+SSH_COMMON_OPTS=()
+build_ssh_common_opts() {
+    SSH_COMMON_OPTS=(
+        -v
+        -o "UserKnownHostsFile=$KNOWN_HOSTS"
+        -o "StrictHostKeyChecking=yes"
+        -o "ConnectTimeout=$CONNECT_TIMEOUT"
+        -o "BatchMode=yes"
+        -p "$PORT"
+    )
+}
+
+# Everything below this point (argument parsing through the final exit) is
+# wrapped in main() and only invoked when this file is executed directly
+# (see the BASH_SOURCE guard at the very end) -- scripts/
+# test_ssh_spike_hardware_validation.sh sources this file to unit-test
+# classify_ssh_result() and other functions directly, without running a
+# real validation pass or requiring any arguments.
+# ---- mode: default ----------------------------------------------------------
+
+# An unreachable or offline board must never be mistaken for "SSH is
+# correctly disabled" -- confirm the board is actually there and running
+# this firmware via a default HTTP endpoint before trusting anything the
+# port-2222 probe below reports.
+verify_default_board_reachable() {
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --max-time "$CONNECT_TIMEOUT" "http://$HOST:$HTTP_PORT/api/v1/system/ping" -o /dev/null 2>/dev/null; then
+            pass "board is reachable and identifiable via HTTP /api/v1/system/ping"
+            return 0
+        fi
+        fail "board is NOT reachable via HTTP /api/v1/system/ping at http://$HOST:$HTTP_PORT/ -- cannot distinguish 'default firmware, SSH correctly disabled' from 'board unreachable/offline/wrong host', so the port-$PORT check below would be meaningless"
+        return 1
+    fi
+    skip_required "board liveness verification (curl not available -- cannot safely distinguish an unreachable board from a board with SSH correctly disabled)"
+    return 1
+}
+
+check_port_closed() {
+    if ! verify_default_board_reachable; then
+        return
+    fi
+    local desc="default firmware does not expose SSH on port $PORT"
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z -w "$CONNECT_TIMEOUT" "$HOST" "$PORT" 2>/dev/null; then
+            fail "$desc (nc connected -- port is open)"
+        else
+            pass "$desc"
+        fi
+        return
+    fi
+    # Portable fallback: bash's /dev/tcp pseudo-device.
+    if run_with_timeout "$CONNECT_TIMEOUT" bash -c "exec 3<>\"/dev/tcp/$HOST/$PORT\"" 2>/dev/null; then
+        fail "$desc (/dev/tcp connected -- port is open)"
+    else
+        pass "$desc"
+    fi
+}
+
+# ---- shared helpers for experimental mode ----------------------------------
+
+verify_host_key_fingerprint() {
+    local scan_out="$SCRATCH_DIR/keyscan.txt"
+    if ! command -v ssh-keyscan >/dev/null 2>&1; then
+        fail "host-key fingerprint verification (ssh-keyscan not available -- cannot proceed safely)"
+        return 1
+    fi
+    if ! run_with_timeout "$CONNECT_TIMEOUT" ssh-keyscan -p "$PORT" -t ecdsa-sha2-nistp256 "$HOST" \
+            > "$scan_out" 2>/dev/null || [[ ! -s "$scan_out" ]]; then
+        fail "host-key fingerprint verification (could not fetch host key from $HOST:$PORT)"
+        return 1
+    fi
+    local actual_fp
+    actual_fp="$(ssh-keygen -lf "$scan_out" 2>/dev/null | awk '{print $2}')"
+    if [[ "$actual_fp" != "$HOST_KEY_FINGERPRINT" ]]; then
+        fail "host-key fingerprint mismatch: expected $HOST_KEY_FINGERPRINT, got ${actual_fp:-<none>} -- refusing to proceed (possible MITM or stale --host-key-fingerprint)"
+        return 1
+    fi
+    cp "$scan_out" "$KNOWN_HOSTS"
+    pass "host-key fingerprint matches ($actual_fp)"
+    return 0
+}
+
+# run_ssh <label> <timeout-seconds> <extra ssh args...> -- <remote command...>
+# Sets RUN_SSH_RC, RUN_SSH_OUT (transcript path), and RUN_SSH_CLASS (see
+# classify_ssh_result()) rather than returning a value via command
+# substitution, so callers don't need an extra subshell layer just to read
+# the result.
+RUN_SSH_RC=0
+RUN_SSH_OUT=""
+RUN_SSH_CLASS=""
+run_ssh() {
+    local label="$1" timeout_s="$2"; shift 2
+    local -a extra_args=()
+    while [[ "$1" != "--" ]]; do
+        extra_args+=("$1")
+        shift
+    done
+    shift # consume --
+    # printf, not echo: echo's trailing newline would otherwise get
+    # translated by `tr -c` into a literal trailing underscore, breaking
+    # every filename this produces.
+    local out="$SCRATCH_DIR/$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '_').out"
+    set +e
+    run_with_timeout "$timeout_s" ssh "${SSH_COMMON_OPTS[@]}" "${extra_args[@]}" "$SSH_USER@$HOST" "$@" \
+        > "$out" 2>&1
+    RUN_SSH_RC=$?
+    set -e
+    RUN_SSH_OUT="$out"
+    RUN_SSH_CLASS="$(classify_ssh_result "$out" "$RUN_SSH_RC")"
+    cp "$out" "$EVIDENCE_DIR/$(basename "$out")" 2>/dev/null || true
+}
+
+test_ping_success() {
+    # ssh -v's own debug lines, plus its post-command "Transferred:"/"Bytes
+    # per second:" summary, go into the same captured transcript as the
+    # actual command output -- an exact-equality check on the whole
+    # transcript would spuriously fail. The real "pong" line is the only
+    # stdout content ssh(1) ever produces for this exec command; isolate it
+    # with extract_last_output_line() instead of comparing the whole
+    # capture.
+    local last_line
+    run_ssh "ping_success" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- ping
+    last_line="$(extract_last_output_line "$RUN_SSH_OUT")"
+    if [[ "$RUN_SSH_CLASS" == "success" && "$last_line" == "$EXPECTED_PING_OUTPUT" ]]; then
+        pass "exec ping -> exact 'pong' output, exit $RUN_SSH_RC"
+        return 0
+    fi
+    fail "exec ping -> expected exit $EXPECTED_PING_EXIT and output '$EXPECTED_PING_OUTPUT', got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC last_line='$last_line'"
+    return 1
+}
+
+test_algorithms() {
+    local rc
+    run_ssh "algorithms" "$COMMAND_TIMEOUT" -vvv -i "$IDENTITY" -- ping
+    rc="$RUN_SSH_RC"
+    local transcript="$RUN_SSH_OUT"
+    if [[ "$RUN_SSH_CLASS" != "success" ]]; then
+        fail "negotiated-algorithm check: the underlying ping did not succeed (class=$RUN_SSH_CLASS, exit=$rc) -- algorithm negotiation happens before this, but a failed session is not solid evidence to report algorithms from"
+        return
+    fi
+    local kex hostkey cipher
+    # OpenSSH's debug output is CRLF-terminated on at least some platforms;
+    # tr -d '\r' before extracting the last field, or a trailing \r ends up
+    # silently appended to the captured value and every comparison below
+    # fails even though the printed values look identical.
+    kex="$(grep -m1 -E 'kex: algorithm:' "$transcript" | tr -d '\r' | awk '{print $NF}' || true)"
+    hostkey="$(grep -m1 -E 'kex: host key algorithm:' "$transcript" | tr -d '\r' | awk '{print $NF}' || true)"
+    cipher="$(grep -m1 -E 'kex: (server->client|client->server) cipher:' "$transcript" | tr -d '\r' | awk '{print $5}' || true)"
+    local ok=1
+    [[ "$kex" == "$EXPECTED_KEX" ]] || { fail "negotiated kex algorithm: expected $EXPECTED_KEX, got ${kex:-<none>}"; ok=0; }
+    [[ "$hostkey" == "$EXPECTED_HOSTKEY_ALGO" ]] || { fail "negotiated host-key algorithm: expected $EXPECTED_HOSTKEY_ALGO, got ${hostkey:-<none>}"; ok=0; }
+    [[ "$cipher" == "$EXPECTED_CIPHER" ]] || { fail "negotiated cipher: expected $EXPECTED_CIPHER, got ${cipher:-<none>}"; ok=0; }
+    [[ "$ok" -eq 1 ]] && pass "negotiated algorithms match: kex=$kex hostkey=$hostkey cipher=$cipher"
+}
+
+test_wrong_key_rejected() {
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        skip_required "wrong-key rejection (ssh-keygen not available to generate a throwaway key)"
+        return
+    fi
+    local wrong_key="$SCRATCH_DIR/throwaway_key"
+    ssh-keygen -q -t ecdsa -b 256 -N "" -f "$wrong_key" >/dev/null 2>&1
+    run_ssh "wrong_key" "$COMMAND_TIMEOUT" -i "$wrong_key" -- ping
+    if [[ "$RUN_SSH_CLASS" == "auth_rejected" ]]; then
+        pass "unrecognized public key is rejected (auth_rejected, exit $RUN_SSH_RC)"
+    else
+        fail "unrecognized public key: expected auth_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it was ACCEPTED (auth not fail-closed) or the failure is inconclusive (see $RUN_SSH_OUT)"
+    fi
+}
+
+# run_ssh always targets $SSH_USER@$HOST; this check needs a different
+# username, so it can't reuse run_ssh's fixed target unless the target is
+# made an explicit argument. Implement it directly instead of layering
+# more flags onto run_ssh for a single caller.
+test_wrong_user_rejected() {
+    local out="$SCRATCH_DIR/wrong_user.out"
+    set +e
+    run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$IDENTITY" "not-$SSH_USER@$HOST" ping \
+        > "$out" 2>&1
+    local rc=$?
+    set -e
+    cp "$out" "$EVIDENCE_DIR/wrong_user.out" 2>/dev/null || true
+    local class
+    class="$(classify_ssh_result "$out" "$rc")"
+    if [[ "$class" == "auth_rejected" ]]; then
+        pass "unknown username is rejected (auth_rejected, exit $rc)"
+    else
+        fail "unknown username: expected auth_rejected, got class=$class exit=$rc -- either it was ACCEPTED (auth not fail-closed) or the failure is inconclusive (see $out)"
+    fi
+}
+
+test_password_rejected() {
+    run_ssh "password_auth" "$COMMAND_TIMEOUT" \
+        -o PreferredAuthentications=password,keyboard-interactive \
+        -o PubkeyAuthentication=no -- ping
+    if [[ "$RUN_SSH_CLASS" == "auth_rejected" ]]; then
+        pass "password/keyboard-interactive authentication is unavailable (auth_rejected, exit $RUN_SSH_RC)"
+    else
+        fail "password/keyboard-interactive auth: expected auth_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+    fi
+}
+
+test_unknown_command_rejected() {
+    local out
+    run_ssh "unknown_command" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- "not-a-real-command"
+    out="$(cat "$RUN_SSH_OUT" 2>/dev/null || true)"
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" && "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
+        pass "unsupported exec command is rejected (protocol_rejected, exit $RUN_SSH_RC, no '$EXPECTED_PING_OUTPUT' in output)"
+    else
+        fail "unsupported exec command: expected protocol_rejected with no '$EXPECTED_PING_OUTPUT' in output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC (see $RUN_SSH_OUT)"
+    fi
+}
+
+test_shell_rejected() {
+    run_ssh "shell_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" --
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]]; then
+        pass "interactive shell request is rejected (protocol_rejected, exit $RUN_SSH_RC)"
+    else
+        fail "interactive shell request: expected protocol_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+    fi
+}
+
+test_pty_rejected() {
+    local out
+    run_ssh "pty_request" "$COMMAND_TIMEOUT" -tt -i "$IDENTITY" -- ping
+    out="$(cat "$RUN_SSH_OUT" 2>/dev/null || true)"
+    # This spike's exec callback rejects a PTY'd exec request at the exec
+    # stage (wolfSSH_ChannelIsPty()), not at the pty-req stage itself --
+    # wolfSSH has no pty-req rejection callback to hook, so the pty-req is
+    # protocol-acknowledged and only the subsequent "ping" exec fails.
+    # There is deliberately no OpenSSH-client-side "PTY allocation
+    # request failed" string to match here (that message is what a
+    # *different* rejection mechanism -- the server refusing the pty-req
+    # itself -- produces, e.g. against a plain sshd with `no-pty`; it is
+    # not what this implementation does). The direct evidence available
+    # for *this* implementation is: authentication succeeded, the overall
+    # request still failed, and -- the actual security property under
+    # test -- "ping" was never serviced.
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" && "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
+        pass "PTY allocation is rejected (protocol_rejected, exit $RUN_SSH_RC, no '$EXPECTED_PING_OUTPUT' in output)"
+    else
+        fail "PTY allocation: expected protocol_rejected with no '$EXPECTED_PING_OUTPUT' in output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC (see $RUN_SSH_OUT)"
+    fi
+}
+
+test_subsystem_rejected() {
+    run_ssh "subsystem_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" -s -- sftp
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]]; then
+        pass "subsystem request is rejected (protocol_rejected, exit $RUN_SSH_RC)"
+    else
+        fail "subsystem request: expected protocol_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+    fi
+}
+
+test_forwarding_rejected() {
+    # `-W host:port` makes ssh(1) issue a real direct-tcpip channel-open
+    # request to the server and use it for stdio -- unlike `-L ...:0...`,
+    # which OpenSSH rejects locally as an invalid forwarding specification
+    # before ever contacting the server (a local_invocation_failure, not
+    # evidence of anything the board did). A rejected -W request produces
+    # OpenSSH's well-known "channel N: open failed: ..." message once
+    # authenticated, which classify_ssh_result() reports as
+    # protocol_rejected the same way it would any other post-auth refusal.
+    run_ssh "forwarding_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" \
+        -W "127.0.0.1:$HTTP_PORT" --
+    if [[ "$RUN_SSH_CLASS" == "protocol_rejected" ]]; then
+        pass "direct-tcpip channel-open (forwarding) request is rejected (protocol_rejected, exit $RUN_SSH_RC)"
+    else
+        fail "direct-tcpip channel-open request: expected protocol_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+    fi
+}
+
+test_second_connection_rejected() {
+    if ! command -v nc >/dev/null 2>&1; then
+        skip_required "second-simultaneous-connection rejection (nc not available to hold a raw connection open)"
+        return
+    fi
+    # g_session_active is set the instant accept() returns, before the SSH
+    # handshake even begins -- so a raw, silent TCP connection is enough to
+    # occupy the one allowed slot for the hold duration. Use `nc -v` (BSD
+    # and GNU nc both support it) so the holder's own stderr proves the
+    # connection was actually established, rather than assuming it was.
+    local holder_log="$SCRATCH_DIR/holder_nc.log"
+    ( sleep "$HOLD_SECONDS" | nc -v "$HOST" "$PORT" > /dev/null 2> "$holder_log" ) &
+    local holder_pid=$!
+
+    local connected=0 tries=0
+    while [[ "$tries" -lt 10 ]]; do
+        if grep -qiE 'succeeded|open|connected' "$holder_log" 2>/dev/null; then
+            connected=1
+            break
+        fi
+        sleep 0.3
+        tries=$((tries + 1))
+    done
+    if [[ "$connected" -ne 1 ]]; then
+        fail "second-simultaneous-connection rejection: could not confirm the held connection was actually established (see $holder_log) -- inconclusive, not attempting the second connection"
+        wait "$holder_pid" 2>/dev/null || true
+        return
+    fi
+
+    # The board's own expected behavior here (accept, then immediately
+    # close, before any SSH protocol exchange) looks like an early
+    # connection close from the client's point of view -- classified as
+    # transport_failure by classify_ssh_result(), not protocol_rejected,
+    # since no "Authenticated to" line will ever appear. Both classes (and
+    # auth_rejected, in case the board instead responds by refusing auth
+    # outright) count as evidence the second connection did not succeed;
+    # success/timeout/local_invocation_failure/host_key_failure do not.
+    run_ssh "second_connection" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- ping
+    if class_in "$RUN_SSH_CLASS" transport_failure protocol_rejected auth_rejected; then
+        pass "second simultaneous connection is rejected while the first is active (class=$RUN_SSH_CLASS)"
+    else
+        fail "second simultaneous connection: expected transport_failure/protocol_rejected/auth_rejected, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC -- either it unexpectedly SUCCEEDED or the failure is inconclusive (see $RUN_SSH_OUT)"
+    fi
+
+    wait "$holder_pid" 2>/dev/null || true
+}
+
+test_reconnect_after_close() {
+    sleep 1
+    local last_line
+    run_ssh "reconnect" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- ping
+    last_line="$(extract_last_output_line "$RUN_SSH_OUT")"
+    if [[ "$RUN_SSH_CLASS" == "success" && "$last_line" == "$EXPECTED_PING_OUTPUT" ]]; then
+        pass "reconnect after the previous connection closed succeeds"
+    else
+        fail "reconnect after close: expected success with '$EXPECTED_PING_OUTPUT' output, got class=$RUN_SSH_CLASS exit=$RUN_SSH_RC last_line='$last_line'"
+    fi
+}
+
+probe_tcp_open() {
+    local label="$1" port="$2"
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z -w "$CONNECT_TIMEOUT" "$HOST" "$port" 2>/dev/null; then
+            pass "$label reachable on port $port"
+        else
+            fail "$label NOT reachable on port $port"
+        fi
+        return
+    fi
+    if run_with_timeout "$CONNECT_TIMEOUT" bash -c "exec 3<>\"/dev/tcp/$HOST/$port\"" 2>/dev/null; then
+        pass "$label reachable on port $port"
+    else
+        fail "$label NOT reachable on port $port"
+    fi
+}
+
+probe_coexistence() {
+    # Best-effort and explicitly optional: never contributes to
+    # REQUIRED_SKIP_COUNT, since these are reachability probes supporting
+    # the manual coexistence checklist, not part of the SSH policy
+    # evidence itself.
+    if [[ "$SKIP_COEXISTENCE" -eq 1 ]]; then
+        skip "coexistence probes (--skip-coexistence given)"
+        return
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --max-time "$CONNECT_TIMEOUT" "http://$HOST:$HTTP_PORT/" -o "$EVIDENCE_DIR/http_root.html" 2>/dev/null; then
+            pass "HTTP landing page reachable at http://$HOST:$HTTP_PORT/"
+        else
+            fail "HTTP landing page NOT reachable at http://$HOST:$HTTP_PORT/"
+        fi
+        if curl -fsS --max-time "$CONNECT_TIMEOUT" "http://$HOST:$HTTP_PORT/api/v1/system/ping" -o "$EVIDENCE_DIR/http_api_ping.json" 2>/dev/null; then
+            pass "HTTP /api/v1/system/ping reachable"
+        else
+            fail "HTTP /api/v1/system/ping NOT reachable"
+        fi
+    else
+        skip "HTTP coexistence probes (curl not available)"
+    fi
+    probe_tcp_open "GDB TCP listener" "$GDB_PORT"
+    probe_tcp_open "raw UART TCP listener" "$UART_PORT"
+    log "manual-only coexistence phases NOT automated by this script: the Svelte /config UI's interactive behavior, Wi-Fi loss/recovery, and USB CLI/debugging behavior -- see the PR operator checklist."
+}
+
+run_soak() {
+    if [[ "$CYCLES" -eq 0 ]]; then
+        skip "soak phase (--cycles 0)"
+        return
+    fi
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        skip_required "soak phase (ssh-keygen not available to generate the per-cycle throwaway key)"
+        return
+    fi
+    local wrong_key="$SCRATCH_DIR/soak_throwaway_key"
+    ssh-keygen -q -t ecdsa -b 256 -N "" -f "$wrong_key" >/dev/null 2>&1
+
+    local soak_pass=0 soak_fail=0
+    log "starting soak phase: $CYCLES cycles of (successful ping, expected auth_rejected wrong key)"
+    for ((i = 1; i <= CYCLES; i++)); do
+        local out rc class last_line
+        out="$SCRATCH_DIR/soak_${i}_ok.out"
+        set +e
+        run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$IDENTITY" "$SSH_USER@$HOST" ping \
+            > "$out" 2>&1
+        rc=$?
+        set -e
+        class="$(classify_ssh_result "$out" "$rc")"
+        last_line="$(extract_last_output_line "$out")"
+        if [[ "$class" == "success" && "$last_line" == "$EXPECTED_PING_OUTPUT" ]]; then
+            soak_pass=$((soak_pass + 1))
+        else
+            fail "soak cycle $i: successful-ping leg expected success/'$EXPECTED_PING_OUTPUT', got class=$class exit=$rc"
+            cp "$out" "$EVIDENCE_DIR/soak_${i}_ok.out" 2>/dev/null || true
+        fi
+
+        out="$SCRATCH_DIR/soak_${i}_bad.out"
+        set +e
+        run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$wrong_key" "$SSH_USER@$HOST" ping \
+            > "$out" 2>&1
+        rc=$?
+        set -e
+        class="$(classify_ssh_result "$out" "$rc")"
+        if [[ "$class" == "auth_rejected" ]]; then
+            soak_fail=$((soak_fail + 1))
+        else
+            fail "soak cycle $i: expected-failure leg expected auth_rejected, got class=$class exit=$rc"
+            cp "$out" "$EVIDENCE_DIR/soak_${i}_bad.out" 2>/dev/null || true
+        fi
+    done
+
+    {
+        echo "soak_cycles_requested=$CYCLES"
+        echo "soak_successful_pings_observed=$soak_pass"
+        echo "soak_expected_auth_rejections_observed=$soak_fail"
+    } > "$EVIDENCE_DIR/soak_summary.txt"
+
+    if [[ "$soak_pass" -eq "$CYCLES" && "$soak_fail" -eq "$CYCLES" ]]; then
+        pass "soak phase: $CYCLES/$CYCLES successful-ping cycles and $CYCLES/$CYCLES auth_rejected wrong-key cycles all behaved as expected"
+    else
+        fail "soak phase: only $soak_pass/$CYCLES successful-ping and $soak_fail/$CYCLES auth_rejected cycles behaved as expected -- see soak_summary.txt and per-cycle transcripts in $EVIDENCE_DIR"
+    fi
+    log "This script does NOT itself observe device-side heap/stack telemetry during the soak; pair it with --monitor-log from a serial capture taken over the same run to fill in the resource-degradation evidence (see docs/design/ssh-feasibility-spike.md section 8)."
+}
+
+summarize_monitor_log() {
+    if [[ -z "$MONITOR_LOG" ]]; then
+        skip "serial monitor log summary (--monitor-log not given)"
+        return
+    fi
+    if [[ ! -f "$MONITOR_LOG" ]]; then
+        fail "serial monitor log summary (--monitor-log path does not exist: $MONITOR_LOG)"
+        return
+    fi
+    local out="$EVIDENCE_DIR/monitor_log_summary.txt"
+    {
+        echo "# Extracted from: $MONITOR_LOG"
+        echo "# Resource checkpoints (never contain key material by construction):"
+        grep -E 'checkpoint=[A-Za-z_]+ free_heap=[0-9]+ min_free_heap_since_boot=[0-9]+ largest_free_block=[0-9]+ stack_hwm=[0-9]+' \
+            "$MONITOR_LOG" || echo "(none found)"
+        echo
+        echo "# Handshake/auth durations:"
+        grep -E 'handshake_auth_duration_ms=[0-9]+ result=(success|failure)' \
+            "$MONITOR_LOG" || echo "(none found)"
+    } > "$out"
+    local n
+    n=$(grep -cE 'checkpoint=|handshake_auth_duration_ms=' "$out" || true)
+    if [[ "$n" -gt 0 ]]; then
+        pass "serial monitor log summary written to $out ($n matching lines) -- copy these into design doc section 8 in place of 'Pending hardware measurement'"
+    else
+        fail "serial monitor log given but no checkpoint/handshake-duration lines found in it -- was SSH actually exercised during this capture?"
+    fi
+}
+
+main() {
 
 # ---- argument parsing -------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -160,6 +794,7 @@ while [[ $# -gt 0 ]]; do
         --connect-timeout) CONNECT_TIMEOUT="$2"; shift 2 ;;
         --hold-seconds) HOLD_SECONDS="$2"; shift 2 ;;
         --skip-coexistence) SKIP_COEXISTENCE=1; shift ;;
+        --allow-incomplete-evidence) ALLOW_INCOMPLETE=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *)
@@ -209,23 +844,6 @@ trap cleanup EXIT INT TERM
 KNOWN_HOSTS="$SCRATCH_DIR/known_hosts"
 : > "$KNOWN_HOSTS"
 
-# Plain array assignment rather than a function-that-prints-lines-captured-
-# with-mapfile: `mapfile`/`readarray` need bash 4+, but macOS ships bash 3.2
-# at /bin/bash by default, and this script otherwise has no bash-version
-# requirement worth imposing. Call build_ssh_common_opts() once argument
-# parsing/validation has finished and $KNOWN_HOSTS exists; every helper
-# below just reads the SSH_COMMON_OPTS array it fills in.
-SSH_COMMON_OPTS=()
-build_ssh_common_opts() {
-    SSH_COMMON_OPTS=(
-        -o "UserKnownHostsFile=$KNOWN_HOSTS"
-        -o "StrictHostKeyChecking=yes"
-        -o "ConnectTimeout=$CONNECT_TIMEOUT"
-        -o "BatchMode=yes"
-        -o "LogLevel=ERROR"
-        -p "$PORT"
-    )
-}
 build_ssh_common_opts
 
 # ---- dry-run: print the plan, touch nothing else --------------------------
@@ -233,7 +851,10 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "Dry run: arguments valid. Planned phases for --mode $MODE:"
     if [[ "$MODE" == "default" ]]; then
         cat <<EOF
-  1. Verify TCP port $PORT is NOT accepting connections on $HOST.
+  1. Confirm the board is reachable and identifiable via HTTP
+     (http://$HOST:$HTTP_PORT/api/v1/system/ping) -- an unreachable/offline
+     board must not be confused with "SSH correctly disabled".
+  2. Verify TCP port $PORT is NOT accepting connections on $HOST.
 EOF
     else
         cat <<EOF
@@ -243,22 +864,27 @@ EOF
   2. exec ping -> expect exact "pong" output and exit $EXPECTED_PING_EXIT.
   3. Verify negotiated algorithms (kex=$EXPECTED_KEX,
      hostkey=$EXPECTED_HOSTKEY_ALGO, cipher=$EXPECTED_CIPHER) via ssh -vvv.
-  4. Wrong (ephemeral, freshly generated) key -> expect rejection.
-  5. Wrong username -> expect rejection.
+  4. Wrong (ephemeral, freshly generated) key -> expect auth_rejected.
+  5. Wrong username -> expect auth_rejected.
   6. Password/keyboard-interactive auth (no valid password exists) ->
-     expect rejection (server advertises publickey only).
-  7. Unknown exec command -> expect rejection.
-  8. Shell request (no command) -> expect rejection, bounded by timeout.
-  9. PTY allocation (-tt) -> expect rejection.
-  10. Subsystem request -> expect rejection.
-  11. Port forwarding (-L) -> expect rejection, bounded by timeout.
-  12. Hold one raw TCP connection open, verify a second connection is
-      rejected while the first is active, then verify reconnect succeeds
-      after the first closes.
-  13. Coexistence probes: HTTP :$HTTP_PORT, GDB :$GDB_PORT, UART :$UART_PORT TCP reachability$( [[ "$SKIP_COEXISTENCE" -eq 1 ]] && echo " (skipped by flag)" ).
-  14. Soak phase: $CYCLES cycles of (successful ping, expected-failure wrong key).
+     expect auth_rejected (server advertises publickey only).
+  7. Unknown exec command -> expect protocol_rejected, no "pong" output.
+  8. Shell request (no command) -> expect protocol_rejected.
+  9. PTY allocation (-tt) -> expect protocol_rejected, no "pong" output.
+  10. Subsystem request -> expect protocol_rejected.
+  11. Port forwarding via -W (a real direct-tcpip channel-open request,
+      not a locally-rejected -L specification) -> expect protocol_rejected.
+  12. Verify a held raw TCP connection actually connects, then verify a
+      second connection is rejected (transport_failure or
+      protocol_rejected -- the board's accept-then-immediately-close
+      behavior looks like an early close either way) while the first is
+      active, then verify reconnect succeeds after the first closes.
+  13. Coexistence probes: HTTP :$HTTP_PORT, GDB :$GDB_PORT, UART :$UART_PORT TCP reachability$( [[ "$SKIP_COEXISTENCE" -eq 1 ]] && echo " (skipped by flag)" ) -- optional, does not affect the required-evidence exit status.
+  14. Soak phase: $CYCLES cycles of (successful ping, expected auth_rejected wrong key).
   15. If --monitor-log was given, extract and summarize checkpoint/heap/
       duration evidence lines.
+  A run with any required check skipped (missing ssh-keygen/nc/curl) exits
+  non-zero unless --allow-incomplete-evidence is given.
 EOF
     fi
     echo "Evidence directory (would be used): $EVIDENCE_DIR"
@@ -266,358 +892,6 @@ EOF
     exit 0
 fi
 
-# ---- mode: default ----------------------------------------------------------
-check_port_closed() {
-    local desc="default firmware does not expose SSH on port $PORT"
-    if command -v nc >/dev/null 2>&1; then
-        if nc -z -w "$CONNECT_TIMEOUT" "$HOST" "$PORT" 2>/dev/null; then
-            fail "$desc (nc connected -- port is open)"
-        else
-            pass "$desc"
-        fi
-        return
-    fi
-    # Portable fallback: bash's /dev/tcp pseudo-device.
-    if run_with_timeout "$CONNECT_TIMEOUT" bash -c "exec 3<>\"/dev/tcp/$HOST/$PORT\"" 2>/dev/null; then
-        fail "$desc (/dev/tcp connected -- port is open)"
-    else
-        pass "$desc"
-    fi
-}
-
-# ---- shared helpers for experimental mode ----------------------------------
-
-verify_host_key_fingerprint() {
-    local scan_out="$SCRATCH_DIR/keyscan.txt"
-    if ! command -v ssh-keyscan >/dev/null 2>&1; then
-        fail "host-key fingerprint verification (ssh-keyscan not available -- cannot proceed safely)"
-        return 1
-    fi
-    if ! run_with_timeout "$CONNECT_TIMEOUT" ssh-keyscan -p "$PORT" -t ecdsa-sha2-nistp256 "$HOST" \
-            > "$scan_out" 2>/dev/null || [[ ! -s "$scan_out" ]]; then
-        fail "host-key fingerprint verification (could not fetch host key from $HOST:$PORT)"
-        return 1
-    fi
-    local actual_fp
-    actual_fp="$(ssh-keygen -lf "$scan_out" 2>/dev/null | awk '{print $2}')"
-    if [[ "$actual_fp" != "$HOST_KEY_FINGERPRINT" ]]; then
-        fail "host-key fingerprint mismatch: expected $HOST_KEY_FINGERPRINT, got ${actual_fp:-<none>} -- refusing to proceed (possible MITM or stale --host-key-fingerprint)"
-        return 1
-    fi
-    cp "$scan_out" "$KNOWN_HOSTS"
-    pass "host-key fingerprint matches ($actual_fp)"
-    return 0
-}
-
-run_ssh() {
-    # run_ssh <label> <timeout-seconds> <extra ssh args...> -- <remote command...>
-    local label="$1" timeout_s="$2"; shift 2
-    local -a extra_args=()
-    while [[ "$1" != "--" ]]; do
-        extra_args+=("$1")
-        shift
-    done
-    shift # consume --
-    # printf, not echo: echo's trailing newline would otherwise get
-    # translated by `tr -c` into a literal trailing underscore, breaking
-    # every filename this produces.
-    local out="$SCRATCH_DIR/$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '_').out"
-    set +e
-    run_with_timeout "$timeout_s" ssh "${SSH_COMMON_OPTS[@]}" "${extra_args[@]}" "$SSH_USER@$HOST" "$@" \
-        > "$out" 2>&1
-    local rc=$?
-    set -e
-    cp "$out" "$EVIDENCE_DIR/$(basename "$out")" 2>/dev/null || true
-    printf '%s' "$rc"
-}
-
-test_ping_success() {
-    local rc out
-    rc=$(run_ssh "ping_success" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- ping)
-    out="$(cat "$SCRATCH_DIR/ping_success.out" 2>/dev/null || true)"
-    if [[ "$rc" -eq "$EXPECTED_PING_EXIT" && "$out" == "$EXPECTED_PING_OUTPUT" ]]; then
-        pass "exec ping -> exact 'pong' output, exit $rc"
-        return 0
-    fi
-    fail "exec ping -> expected exit $EXPECTED_PING_EXIT and output '$EXPECTED_PING_OUTPUT', got exit $rc output '$out'"
-    return 1
-}
-
-test_algorithms() {
-    local rc
-    rc=$(run_ssh "algorithms" "$COMMAND_TIMEOUT" -vvv -i "$IDENTITY" -- ping)
-    local transcript="$SCRATCH_DIR/algorithms.out"
-    local kex hostkey cipher
-    # OpenSSH's debug output is CRLF-terminated on at least some platforms;
-    # tr -d '\r' before extracting the last field, or a trailing \r ends up
-    # silently appended to the captured value and every comparison below
-    # fails even though the printed values look identical.
-    kex="$(grep -m1 -E 'kex: algorithm:' "$transcript" | tr -d '\r' | awk '{print $NF}' || true)"
-    hostkey="$(grep -m1 -E 'kex: host key algorithm:' "$transcript" | tr -d '\r' | awk '{print $NF}' || true)"
-    cipher="$(grep -m1 -E 'kex: (server->client|client->server) cipher:' "$transcript" | tr -d '\r' | awk '{print $5}' || true)"
-    local ok=1
-    [[ "$kex" == "$EXPECTED_KEX" ]] || { fail "negotiated kex algorithm: expected $EXPECTED_KEX, got ${kex:-<none>}"; ok=0; }
-    [[ "$hostkey" == "$EXPECTED_HOSTKEY_ALGO" ]] || { fail "negotiated host-key algorithm: expected $EXPECTED_HOSTKEY_ALGO, got ${hostkey:-<none>}"; ok=0; }
-    [[ "$cipher" == "$EXPECTED_CIPHER" ]] || { fail "negotiated cipher: expected $EXPECTED_CIPHER, got ${cipher:-<none>}"; ok=0; }
-    [[ "$ok" -eq 1 ]] && pass "negotiated algorithms match: kex=$kex hostkey=$hostkey cipher=$cipher"
-}
-
-test_wrong_key_rejected() {
-    if ! command -v ssh-keygen >/dev/null 2>&1; then
-        skip "wrong-key rejection (ssh-keygen not available to generate a throwaway key)"
-        return
-    fi
-    local wrong_key="$SCRATCH_DIR/throwaway_key"
-    ssh-keygen -q -t ecdsa -b 256 -N "" -f "$wrong_key" >/dev/null 2>&1
-    local rc
-    rc=$(run_ssh "wrong_key" "$COMMAND_TIMEOUT" -i "$wrong_key" -- ping)
-    if [[ "$rc" -ne 0 ]]; then
-        pass "unrecognized public key is rejected (exit $rc)"
-    else
-        fail "unrecognized public key was ACCEPTED -- authentication is not fail-closed"
-    fi
-}
-
-test_wrong_user_rejected() {
-    local out="$SCRATCH_DIR/wrong_user.out"
-    set +e
-    run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$IDENTITY" "not-flipper@$HOST" ping \
-        > "$out" 2>&1
-    local rc=$?
-    set -e
-    cp "$out" "$EVIDENCE_DIR/wrong_user.out" 2>/dev/null || true
-    if [[ "$rc" -ne 0 ]]; then
-        pass "unknown username is rejected (exit $rc)"
-    else
-        fail "unknown username was ACCEPTED -- authentication is not fail-closed"
-    fi
-}
-
-test_password_rejected() {
-    local rc
-    rc=$(run_ssh "password_auth" "$COMMAND_TIMEOUT" \
-        -o PreferredAuthentications=password,keyboard-interactive \
-        -o PubkeyAuthentication=no -- ping)
-    if [[ "$rc" -ne 0 ]]; then
-        pass "password/keyboard-interactive authentication is unavailable (exit $rc)"
-    else
-        fail "password/keyboard-interactive authentication unexpectedly SUCCEEDED"
-    fi
-}
-
-test_unknown_command_rejected() {
-    local rc out
-    rc=$(run_ssh "unknown_command" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- "not-a-real-command")
-    out="$(cat "$SCRATCH_DIR/unknown_command.out" 2>/dev/null || true)"
-    if [[ "$rc" -ne 0 && "$out" != *"$EXPECTED_PING_OUTPUT"* ]]; then
-        pass "unsupported exec command is rejected (exit $rc)"
-    else
-        fail "unsupported exec command was NOT rejected (exit $rc, output '$out')"
-    fi
-}
-
-test_shell_rejected() {
-    local rc
-    rc=$(run_ssh "shell_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" --)
-    if [[ "$rc" -ne 0 ]]; then
-        pass "interactive shell request is rejected (exit $rc)"
-    else
-        fail "interactive shell request unexpectedly SUCCEEDED"
-    fi
-}
-
-test_pty_rejected() {
-    local rc
-    rc=$(run_ssh "pty_request" "$COMMAND_TIMEOUT" -tt -i "$IDENTITY" -- ping)
-    if [[ "$rc" -ne 0 ]]; then
-        pass "PTY allocation is rejected (exit $rc)"
-    else
-        fail "PTY allocation unexpectedly SUCCEEDED"
-    fi
-}
-
-test_subsystem_rejected() {
-    local rc
-    rc=$(run_ssh "subsystem_request" "$COMMAND_TIMEOUT" -i "$IDENTITY" -s -- sftp)
-    if [[ "$rc" -ne 0 ]]; then
-        pass "subsystem request is rejected (exit $rc)"
-    else
-        fail "subsystem request unexpectedly SUCCEEDED"
-    fi
-}
-
-test_forwarding_rejected() {
-    local rc
-    rc=$(run_ssh "forwarding_request" "$COMMAND_TIMEOUT" -N -i "$IDENTITY" \
-        -L "127.0.0.1:0:127.0.0.1:80" -- )
-    if [[ "$rc" -ne 0 ]]; then
-        pass "TCP port forwarding is rejected (exit $rc)"
-    else
-        fail "TCP port forwarding unexpectedly SUCCEEDED"
-    fi
-}
-
-test_second_connection_rejected() {
-    if ! command -v nc >/dev/null 2>&1; then
-        skip "second-simultaneous-connection rejection (nc not available to hold a raw connection open)"
-        return
-    fi
-    # g_session_active is set the instant accept() returns, before the SSH
-    # handshake even begins -- so a raw, silent TCP connection is enough to
-    # occupy the one allowed slot for the hold duration.
-    ( sleep "$HOLD_SECONDS" | nc "$HOST" "$PORT" >/dev/null 2>&1 ) &
-    local holder_pid=$!
-    sleep 1
-
-    local rc
-    rc=$(run_ssh "second_connection" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- ping)
-    if [[ "$rc" -ne 0 ]]; then
-        pass "second simultaneous connection is rejected while the first is active"
-    else
-        fail "second simultaneous connection unexpectedly SUCCEEDED while the first was active"
-    fi
-
-    wait "$holder_pid" 2>/dev/null || true
-}
-
-test_reconnect_after_close() {
-    sleep 1
-    local rc out
-    rc=$(run_ssh "reconnect" "$COMMAND_TIMEOUT" -i "$IDENTITY" -- ping)
-    out="$(cat "$SCRATCH_DIR/reconnect.out" 2>/dev/null || true)"
-    if [[ "$rc" -eq 0 && "$out" == "$EXPECTED_PING_OUTPUT" ]]; then
-        pass "reconnect after the previous connection closed succeeds"
-    else
-        fail "reconnect after close failed (exit $rc, output '$out')"
-    fi
-}
-
-probe_tcp_open() {
-    local label="$1" port="$2"
-    if command -v nc >/dev/null 2>&1; then
-        if nc -z -w "$CONNECT_TIMEOUT" "$HOST" "$port" 2>/dev/null; then
-            pass "$label reachable on port $port"
-        else
-            fail "$label NOT reachable on port $port"
-        fi
-        return
-    fi
-    if run_with_timeout "$CONNECT_TIMEOUT" bash -c "exec 3<>\"/dev/tcp/$HOST/$port\"" 2>/dev/null; then
-        pass "$label reachable on port $port"
-    else
-        fail "$label NOT reachable on port $port"
-    fi
-}
-
-probe_coexistence() {
-    if [[ "$SKIP_COEXISTENCE" -eq 1 ]]; then
-        skip "coexistence probes (--skip-coexistence given)"
-        return
-    fi
-    if command -v curl >/dev/null 2>&1; then
-        if curl -fsS --max-time "$CONNECT_TIMEOUT" "http://$HOST:$HTTP_PORT/" -o "$EVIDENCE_DIR/http_root.html" 2>/dev/null; then
-            pass "HTTP landing page reachable at http://$HOST:$HTTP_PORT/"
-        else
-            fail "HTTP landing page NOT reachable at http://$HOST:$HTTP_PORT/"
-        fi
-        if curl -fsS --max-time "$CONNECT_TIMEOUT" "http://$HOST:$HTTP_PORT/api/v1/system/ping" -o "$EVIDENCE_DIR/http_api_ping.json" 2>/dev/null; then
-            pass "HTTP /api/v1/system/ping reachable"
-        else
-            fail "HTTP /api/v1/system/ping NOT reachable"
-        fi
-    else
-        skip "HTTP coexistence probes (curl not available)"
-    fi
-    probe_tcp_open "GDB TCP listener" "$GDB_PORT"
-    probe_tcp_open "raw UART TCP listener" "$UART_PORT"
-    log "manual-only coexistence phases NOT automated by this script: the Svelte /config UI's interactive behavior, Wi-Fi loss/recovery, and USB CLI/debugging behavior -- see the PR operator checklist."
-}
-
-run_soak() {
-    if [[ "$CYCLES" -eq 0 ]]; then
-        skip "soak phase (--cycles 0)"
-        return
-    fi
-    if ! command -v ssh-keygen >/dev/null 2>&1; then
-        skip "soak phase (ssh-keygen not available to generate the per-cycle throwaway key)"
-        return
-    fi
-    local wrong_key="$SCRATCH_DIR/soak_throwaway_key"
-    ssh-keygen -q -t ecdsa -b 256 -N "" -f "$wrong_key" >/dev/null 2>&1
-
-    local soak_pass=0 soak_fail=0
-    log "starting soak phase: $CYCLES cycles of (successful ping, expected-failure wrong key)"
-    for ((i = 1; i <= CYCLES; i++)); do
-        local out rc
-        out="$SCRATCH_DIR/soak_${i}_ok.out"
-        set +e
-        run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$IDENTITY" "$SSH_USER@$HOST" ping \
-            > "$out" 2>&1
-        rc=$?
-        set -e
-        if [[ "$rc" -eq 0 && "$(cat "$out")" == "$EXPECTED_PING_OUTPUT" ]]; then
-            soak_pass=$((soak_pass + 1))
-        else
-            fail "soak cycle $i: successful-ping leg failed (exit $rc)"
-            cp "$out" "$EVIDENCE_DIR/soak_${i}_ok.out" 2>/dev/null || true
-        fi
-
-        out="$SCRATCH_DIR/soak_${i}_bad.out"
-        set +e
-        run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$wrong_key" "$SSH_USER@$HOST" ping \
-            > "$out" 2>&1
-        rc=$?
-        set -e
-        if [[ "$rc" -ne 0 ]]; then
-            soak_fail=$((soak_fail + 1))
-        else
-            fail "soak cycle $i: expected-failure leg unexpectedly SUCCEEDED"
-            cp "$out" "$EVIDENCE_DIR/soak_${i}_bad.out" 2>/dev/null || true
-        fi
-    done
-
-    {
-        echo "soak_cycles_requested=$CYCLES"
-        echo "soak_successful_pings_observed=$soak_pass"
-        echo "soak_expected_failures_observed=$soak_fail"
-    } > "$EVIDENCE_DIR/soak_summary.txt"
-
-    if [[ "$soak_pass" -eq "$CYCLES" && "$soak_fail" -eq "$CYCLES" ]]; then
-        pass "soak phase: $CYCLES/$CYCLES successful-ping cycles and $CYCLES/$CYCLES expected-failure cycles all behaved as expected"
-    else
-        fail "soak phase: only $soak_pass/$CYCLES successful-ping and $soak_fail/$CYCLES expected-failure cycles behaved as expected -- see soak_summary.txt and per-cycle transcripts in $EVIDENCE_DIR"
-    fi
-    log "This script does NOT itself observe device-side heap/stack telemetry during the soak; pair it with --monitor-log from a serial capture taken over the same run to fill in the resource-degradation evidence (see docs/design/ssh-feasibility-spike.md section 8)."
-}
-
-summarize_monitor_log() {
-    if [[ -z "$MONITOR_LOG" ]]; then
-        skip "serial monitor log summary (--monitor-log not given)"
-        return
-    fi
-    if [[ ! -f "$MONITOR_LOG" ]]; then
-        fail "serial monitor log summary (--monitor-log path does not exist: $MONITOR_LOG)"
-        return
-    fi
-    local out="$EVIDENCE_DIR/monitor_log_summary.txt"
-    {
-        echo "# Extracted from: $MONITOR_LOG"
-        echo "# Resource checkpoints (never contain key material by construction):"
-        grep -E 'checkpoint=[A-Za-z_]+ free_heap=[0-9]+ min_free_heap_since_boot=[0-9]+ largest_free_block=[0-9]+ stack_hwm=[0-9]+' \
-            "$MONITOR_LOG" || echo "(none found)"
-        echo
-        echo "# Handshake/auth durations:"
-        grep -E 'handshake_auth_duration_ms=[0-9]+ result=(success|failure)' \
-            "$MONITOR_LOG" || echo "(none found)"
-    } > "$out"
-    local n
-    n=$(grep -cE 'checkpoint=|handshake_auth_duration_ms=' "$out" || true)
-    if [[ "$n" -gt 0 ]]; then
-        pass "serial monitor log summary written to $out ($n matching lines) -- copy these into design doc section 8 in place of 'Pending hardware measurement'"
-    else
-        fail "serial monitor log given but no checkpoint/handshake-duration lines found in it -- was SSH actually exercised during this capture?"
-    fi
-}
 
 # ---- run ---------------------------------------------------------------
 log "evidence directory: $EVIDENCE_DIR"
@@ -642,14 +916,22 @@ else
         run_soak || true
     else
         log "host-key fingerprint verification failed -- skipping all remaining checks rather than proceeding against an unverified host"
-        SKIP_COUNT=$((SKIP_COUNT + 12))
     fi
     summarize_monitor_log || true
 fi
 
 echo
-log "SUMMARY: pass=$PASS_COUNT fail=$FAIL_COUNT skip=$SKIP_COUNT (evidence: $EVIDENCE_DIR)"
+log "SUMMARY: pass=$PASS_COUNT fail=$FAIL_COUNT skip=$SKIP_COUNT required_skip=$REQUIRED_SKIP_COUNT (evidence: $EVIDENCE_DIR)"
 if [[ "$FAIL_COUNT" -gt 0 ]]; then
     exit 1
 fi
+if [[ "$REQUIRED_SKIP_COUNT" -gt 0 && "$ALLOW_INCOMPLETE" -eq 0 ]]; then
+    log "INCOMPLETE EVIDENCE: $REQUIRED_SKIP_COUNT required check(s) were skipped -- this run cannot satisfy the merge gate. Install the missing tool(s) and re-run, or pass --allow-incomplete-evidence to acknowledge this for diagnostic use only."
+    exit 1
+fi
 exit 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

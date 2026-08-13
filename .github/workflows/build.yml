@@ -138,6 +138,9 @@ jobs:
       - name: 'Run policy unit tests'
         run: scripts/run_policy_tests.sh
 
+      - name: 'Run hardware-validation-runner regression tests'
+        run: scripts/test_ssh_spike_hardware_validation.sh
+
   # Experimental, SSH-enabled build (CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y).
   # Entirely separate from the default build/job above: uses its own build
   # directory and sdkconfig overlay so the canonical root `sdkconfig` is
