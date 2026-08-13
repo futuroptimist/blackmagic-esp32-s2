@@ -167,9 +167,13 @@ spike against:
 - maintenance status and macOS OpenSSH interoperability; and
 - compatibility with this project's GPLv3 licensing.
 
-The exact library and algorithms remain an explicit decision until primary
-documentation and a reproducible build establish the claims. Do not infer
-compatibility or licensing from a library name alone.
+This decision is made, not open: the feasibility spike below records the
+selected library with primary documentation and a reproducible build.
+Confirming or expanding the supported algorithm set for a production-ready
+configuration remains open and is tracked as Phase 1 ("Supported platform
+and cryptographic foundation") in
+[`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md)'s phased roadmap,
+not here. Do not infer compatibility or licensing from a library name alone.
 
 A first reproducible spike against these criteria is recorded in
 [`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md): wolfSSH/wolfSSL,
@@ -274,7 +278,8 @@ management-plane hardening is not part of this SSH proposal.
 
 ## Open decisions
 
-- SSH library and supported algorithms.
+- Production-phase supported algorithm set beyond the feasibility spike's
+  restricted profile (see `ssh-feasibility-spike.md`'s Phase 1).
 - Default port.
 - Maximum authorized keys and sessions.
 - Enrollment and physical-presence mechanism.
