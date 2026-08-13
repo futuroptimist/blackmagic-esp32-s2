@@ -205,21 +205,42 @@ registers a callback that:
 explicitly registered, not left unset. wolfSSH's own channel-request
 dispatcher (`DoChannelRequest()`, pinned `src/internal.c`) additionally
 handles a few request types with no corresponding application callback to
-reject them, but not all identically: `env`, `window-change`, `exit-status`,
-`exit-signal`, and agent-forwarding are true no-ops — parsed and discarded
-(or, for `env`, logged at debug level) with no lasting effect on connection
-state. `pty-req` is different: it has its own dedicated parsing branch,
-compiled in because `WOLFSSH_TERM` is required for `wolfSSH_ChannelIsPty()`
-(see `user_settings.h`), that stores real per-connection protocol state
-before acknowledging the request. See the `env`/unknown-request bullet in
-[§7](#7-threat-and-safety-boundaries) for the true no-op case, and the
-`pty-req` bullet below for what is actually stored and why that still does
-not amount to PTY access.
-- `wolfSSH_CTX_SetChannelOpenCb` — allow only a `session` channel type; a
-  `direct-tcpip`/forwarded-channel open request is rejected here before any
-  request callback runs (this is also how forwarding is refused even though
-  `WOLFSSH_FWD` is compiled out — belt and suspenders). Also refuses a
-  second channel on a connection that already opened one.
+reject them, but not all identically:
+- `env` and `exit-signal` are true no-ops in this build: their branches are
+  compiled in (both are reachable without any macro this spike leaves
+  undefined) but parse into local variables only and write nothing to
+  `ssh`/`channel` state. `window-change` and agent-forwarding are no-ops
+  for a different reason — their branches require `WOLFSSH_SHELL`/
+  `WOLFSSH_AGENT`, which this spike never defines, so they are compiled out
+  entirely and fall through with no effect at all.
+- `pty-req` has its own dedicated parsing branch, compiled in because
+  `WOLFSSH_TERM` is required for `wolfSSH_ChannelIsPty()` (see
+  `user_settings.h`), that stores real per-connection protocol state before
+  acknowledging the request — see the `pty-req` bullet below for what is
+  actually stored and why that still does not amount to PTY access.
+- `exit-status` is *not* a no-op either, and is handled differently from
+  `pty-req`: see the dedicated bullet below.
+
+See the `env`/unknown-request bullet in [§7](#7-threat-and-safety-boundaries)
+for the true no-op case.
+- `wolfSSH_CTX_SetChannelOpenCb` — restricts whichever channel-open requests
+  actually *reach* the application callback to the `session` type, and
+  refuses a second channel on a connection that already opened one. A
+  `direct-tcpip` (forwarded-channel) open request never reaches this
+  callback at all in this build: `WOLFSSH_FWD` is undefined, so the pinned
+  `DoChannelOpen()` (`src/internal.c`) never compiles in its
+  `ID_CHANTYPE_TCPIP_DIRECT` case, and a `direct-tcpip` type name falls to
+  that `switch`'s `default:` case — `OPEN_UNKNOWN_CHANNEL_TYPE` — which
+  fails the request (`SendChannelOpenFail()`, description `"Channel type
+  not supported."`) *before* `ssh->ctx->channelOpenCb` is ever invoked for
+  it (the call is itself gated on the channel-type dispatch having
+  succeeded). Forwarding is therefore refused by wolfSSH's own
+  unknown-channel-type path, not by this application callback; the
+  callback's `session`-only restriction remains defense in depth should the
+  set of compiled-in channel types ever change (e.g. if `WOLFSSH_FWD` were
+  defined in a future revision). See
+  [§7](#7-threat-and-safety-boundaries) and [§8](#8-measured-results) for
+  the exact client-visible evidence this produces.
 - `wolfSSH_CTX_SetChannelReqExecCb` — the only interesting callback.
   First claims a per-connection one-shot flag
   (`policy_claim_exec_once()`) before doing anything else; a second exec
@@ -229,9 +250,29 @@ not amount to PTY access.
   requested command against the exact string `ping` via
   `policy_command_allowed()`; on match, writes `pong\n` with
   `wolfSSH_ChannelSend()`, sets a success exit status with
-  `wolfSSH_SetExitStatus()`, and lets the channel close. Any other command
-  string is rejected (nonzero return, no shell fallback, no argument
-  parsing/expansion of any kind).
+  `wolfSSH_SetExitStatus()`, and only then records success in
+  `connection_state_t.exec_succeeded` (see the `exit-status` bullet below
+  for why this flag exists). Any other command string is rejected (nonzero
+  return, no shell fallback, no argument parsing/expansion of any kind).
+- **Inbound `exit-status` is not a no-op, and is not application-visible
+  either.** RFC 4254 defines `exit-status` as a server-to-client channel
+  request, but the pinned `DoChannelRequest()` (`src/internal.c`) also
+  accepts one *from* the client on an open channel and stores it directly
+  into `ssh->exitStatus` (`ret = GetUint32(&ssh->exitStatus, buf, len,
+  &begin);`) with no application callback and no check on which direction
+  sent it. `wolfSSH_shutdown()` (pinned `src/ssh.c`) later sends whatever
+  is currently in `ssh->exitStatus` as the channel's final `exit-status`.
+  Left unmitigated, a client could send `exec ping`, receive `pong`, then
+  send its own `exit-status` channel request before the connection closes
+  and silently overwrite the `0` `channel_req_exec_cb()` set. This spike
+  mitigates that narrowly rather than patching wolfSSH: `handle_connection()`
+  (`wolfssh_spike.c`) reasserts `wolfSSH_SetExitStatus(ssh, 0)` immediately
+  before calling `wolfSSH_shutdown()`, but only when
+  `connection_state_t.exec_succeeded` is true — set only after `pong\n` was
+  actually sent and the initial `wolfSSH_SetExitStatus()` call itself
+  succeeded — so a rejected or failed exec is never made to report success,
+  and a client-supplied `exit-status` can no longer override the result of
+  a genuinely successful one.
 - `wolfSSH_CTX_SetChannelReqShellCb` and `wolfSSH_CTX_SetChannelReqSubsysCb`
   — both registered as unconditional-reject callbacks. Neither a `shell`
   channel request nor any named subsystem (which would include a hypothetical
@@ -356,6 +397,18 @@ client                          ESP32-S2 (wolfssh_spike task)
   tested) *before* any command validation or output, so a second exec
   request fails closed even if the first one was rejected (invalid
   command) or failed partway (send error).
+- **A client cannot override the reported exit status of a successful
+  `ping`.** The pinned `DoChannelRequest()` accepts an inbound
+  client-to-server `exit-status` channel request (RFC 4254 defines this
+  direction as server-to-client, but the pinned implementation does not
+  enforce that) and stores it directly into `ssh->exitStatus` with no
+  application callback -- see the `exit-status` bullet in
+  [§6](#6-prototype-architecture). `handle_connection()` reasserts status
+  `0` immediately before `wolfSSH_shutdown()`, but only for a connection
+  where `channel_req_exec_cb()` already recorded a genuinely successful
+  `ping`, so this cannot make a rejected/failed exec report success -- it
+  only prevents a later client-supplied `exit-status` from downgrading a
+  real success.
 - **No SCP, SFTP, forwarding, X11, agent forwarding, or arbitrary
   subsystems.** SCP/SFTP/agent/forwarding source files (`wolfscp.c`,
   `wolfsftp.c`, `agent.c`) are excluded from the component's source list
@@ -552,12 +605,17 @@ What each mode's phases map back to in this document and in
   subsequent `exec request failed on channel` line plus the absence of
   `pong`, not a (nonexistent) PTY-allocation refusal; TCP forwarding is
   probed with `ssh -W` (a real direct-tcpip channel-open request the server
-  must answer) and requires the corresponding `channel N: open failed`
-  `SSH_MSG_CHANNEL_OPEN_FAILURE` evidence, so a forwarding request the board
+  must answer) and requires the specific `channel N: open failed: unknown
+  channel type` `SSH_MSG_CHANNEL_OPEN_FAILURE` reason -- the one wolfSSH's
+  own dispatcher actually sends for this build (see [§6](#6-prototype-architecture)
+  and [§7](#7-threat-and-safety-boundaries)) -- rather than any
+  `channel N: open failed` line, so neither a forwarding request the board
   accepted but whose destination connection later failed for an unrelated
-  reason cannot be mistaken for a rejected request, rather than a
-  `-L ...:0...` specification, which OpenSSH rejects locally before ever
-  contacting the board and would prove nothing; a second simultaneous
+  reason (`connect failed`), nor any other genuine-but-differently-reasoned
+  channel-open failure, can be mistaken for this spike's forwarding policy
+  rejecting the request, rather than a `-L ...:0...` specification, which
+  OpenSSH rejects locally before ever contacting the board and would prove
+  nothing; a second simultaneous
   connection is only attempted after independently confirming (via `nc -v`)
   that the held first connection actually connected, and is then required
   to fail as `transport_failure`/`protocol_rejected`/`auth_rejected` (the

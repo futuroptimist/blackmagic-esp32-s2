@@ -79,6 +79,18 @@ typedef struct {
      * no built-in limit -- this is the only thing enforcing "exactly one
      * exec command per connection". */
     int exec_claimed;
+    /* True only once the single allowed "ping" exec has been fully
+     * serviced: "pong\n" was sent and wolfSSH_SetExitStatus(ssh, 0)
+     * reported success. RFC 4254 defines "exit-status" as a
+     * server-to-client request, but the pinned DoChannelRequest()
+     * (src/internal.c) also accepts it inbound from the client and stores
+     * it directly into ssh->exitStatus with no application callback or
+     * validation -- so a client could send its own "exit-status" request
+     * after a successful ping and silently overwrite the 0 that
+     * wolfSSH_shutdown() later sends. handle_connection() reasserts status
+     * 0 immediately before shutdown, but only when this flag is true, so a
+     * rejected/failed exec is never made to look successful. */
+    bool exec_succeeded;
 } connection_state_t;
 
 /* ---- resource-checkpoint instrumentation (never logs key material) --- */
@@ -184,8 +196,13 @@ static int channel_open_cb(WOLFSSH_CHANNEL* channel, void* ctx)
 
     channelType = wolfSSH_ChannelGetType(channel);
     if (channelType == NULL || strcmp(channelType, "session") != 0) {
-        /* Rejects "direct-tcpip"/forwarded-channel opens explicitly, in
-         * addition to WOLFSSH_FWD never being compiled in. */
+        /* Defense in depth, not what actually stops "direct-tcpip" today:
+         * with WOLFSSH_FWD undefined, the pinned wolfSSH dispatcher
+         * (DoChannelOpen(), src/internal.c) never compiles in the
+         * direct-tcpip case, fails the request as OPEN_UNKNOWN_CHANNEL_TYPE
+         * before this callback is even invoked, and so this branch is
+         * currently unreachable for that request type. It only matters if
+         * the set of compiled-in channel types ever changes. */
         ESP_LOGW(TAG, "rejecting non-session channel open");
         return WS_FATAL_ERROR;
     }
@@ -249,8 +266,12 @@ static int channel_req_exec_cb(WOLFSSH_CHANNEL* channel, void* ctx)
     if (wolfSSH_ChannelSend(channel, (const byte*)"pong\n", 5) < 0) {
         return WS_FATAL_ERROR;
     }
-    if (state != NULL && state->ssh != NULL) {
-        wolfSSH_SetExitStatus(state->ssh, 0);
+    if (state != NULL && state->ssh != NULL &&
+        wolfSSH_SetExitStatus(state->ssh, 0) == WS_SUCCESS) {
+        /* Only ever set on this success path -- see connection_state_t's
+         * exec_succeeded comment for why handle_connection() reasserts
+         * this immediately before shutdown. */
+        state->exec_succeeded = true;
     }
     return WS_SUCCESS;
 }
@@ -332,6 +353,19 @@ static void handle_connection(int client_sock)
         }
     }
 
+    /* The idle-read loop above lets wolfSSH's pinned DoChannelRequest()
+     * (src/internal.c) process any further channel requests the client
+     * sends, including an inbound "exit-status" request -- which that
+     * dispatcher stores directly into ssh->exitStatus with no application
+     * callback or validation, even though RFC 4254 defines "exit-status"
+     * server-to-client. Reassert the server-owned status immediately
+     * before shutdown so a client-supplied exit-status cannot silently
+     * replace the result of a genuinely successful "ping"; only ever
+     * reasserts 0, and only when state.exec_succeeded is true, so a
+     * rejected/failed exec is never made to look successful. */
+    if (state.exec_succeeded) {
+        wolfSSH_SetExitStatus(ssh, 0);
+    }
     wolfSSH_shutdown(ssh);
     wolfSSH_free(ssh);
     close(client_sock);
