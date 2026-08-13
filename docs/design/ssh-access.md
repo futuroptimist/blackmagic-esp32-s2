@@ -228,8 +228,13 @@ into the trusted LAN instead of forwarding the SSH port from the Internet.
 
 ## Verification and rollout
 
-All client commands below are **proposed examples only; SSH is not currently
-implemented**:
+All client commands below are **proposed examples for this production
+design; they are not implemented**. A disabled-by-default, `ping`-only
+feasibility prototype exists (see
+[`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md)), but production
+SSH — including the management shell and the `device_info`/`flipper-log`
+commands shown below — is not, and these examples are not a claim about
+default or current firmware behavior:
 
 ```console
 $ ssh -i ~/.ssh/flipper_id flipper@flipper.local
