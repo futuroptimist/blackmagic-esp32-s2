@@ -613,6 +613,21 @@ run_ssh() {
         shift
     done
     shift # consume --
+    # A small gap before every connection attempt: confirmed on real
+    # hardware, both (a) the board's graceful session shutdown
+    # (wolfSSH_shutdown() waiting for the peer's own close acknowledgment,
+    # pinned src/ssh.c) can legitimately still be finishing for up to
+    # roughly 200ms after the *previous* connection's client-visible round
+    # trip completed, and (b) a raw TCP connect a caller just confirmed
+    # succeeded (e.g. test_second_connection_rejected()'s `nc` holder) can
+    # itself take a little longer to be reflected in the board's own
+    # accept()/session-state bookkeeping than the client-side connect
+    # confirmation implies. Either way, an immediate next connection
+    # attempt can be spuriously treated as colliding with a session that is
+    # (from the client's point of view) already over, or not yet counted as
+    # started. 0.5s is a comfortable margin over the measured ~200ms
+    # threshold; see also run_soak()'s equivalent gaps.
+    sleep 0.5
     # printf, not echo: echo's trailing newline would otherwise get
     # translated by `tr -c` into a literal trailing underscore, breaking
     # every filename this produces.
@@ -690,6 +705,9 @@ test_wrong_key_rejected() {
 # made an explicit argument. Implement it directly instead of layering
 # more flags onto run_ssh for a single caller.
 test_wrong_user_rejected() {
+    # Doesn't go through run_ssh() (different target user), so it needs the
+    # same pre-connection gap directly -- see run_ssh()'s comment.
+    sleep 0.5
     local out="$SCRATCH_DIR/wrong_user.out"
     set +e
     run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$IDENTITY" "not-$SSH_USER@$HOST" ping \
