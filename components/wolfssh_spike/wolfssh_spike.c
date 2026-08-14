@@ -4,7 +4,9 @@
  * decision in this file.
  *
  * Scope, deliberately narrow:
- *   - one listener task plus at most one session task on port 2222
+ *   - one listener task plus one persistent session-worker task on port
+ *     2222 (the worker is created once, not spawned per connection -- see
+ *     connection_task()'s comment)
  *   - one session/channel at a time; any extra connection is accepted and
  *     immediately closed, never left queued
  *   - public-key auth only, fixed username "flipper", one authorized key
@@ -21,6 +23,7 @@
 #include <string.h>
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 #include <lwip/sockets.h>
 #include <esp_log.h>
@@ -64,6 +67,10 @@ extern const uint8_t embedded_authorized_key_blob_end[] asm(
 static WOLFSSH_CTX* g_ctx = NULL;
 static volatile bool g_session_active = false;
 static uint32_t (*g_get_station_ip)(void) = NULL;
+/* Hands one accepted client socket at a time from the listener task to the
+ * persistent session-worker task -- see connection_task() below for why
+ * this replaced spawning a new task per connection. */
+static QueueHandle_t g_session_queue = NULL;
 /* Reset per connection in handle_connection(); wolfSSH does not itself
  * expose a configurable max-auth-attempts bound, so this is enforced
  * explicitly here rather than assumed. */
@@ -373,13 +380,29 @@ static void handle_connection(int client_sock)
     log_resource_checkpoint("after_disconnect");
 }
 
+/* Persistent worker task, created once in wolfssh_spike_start() -- not
+ * spawned and torn down per connection. Creating a fresh
+ * WOLFSSH_SPIKE_TASK_STACK (12 KiB) task for every connection let
+ * FreeRTOS's task-deletion cleanup (performed asynchronously by the IDLE
+ * task, not synchronously at vTaskDelete()) lag behind rapid back-to-back
+ * connections: xTaskCreate() for the next session could then fail under
+ * transient heap pressure, and the failure path already in place closed
+ * the just-accepted socket before any SSH bytes were exchanged -- observed
+ * on real hardware as "Connection reset by peer" on most cycles of a
+ * 100-cycle soak test. Blocking on a depth-1 queue for the next
+ * handed-off client socket avoids the repeated allocation/teardown
+ * entirely while keeping the same one-session-at-a-time behavior. */
 static void connection_task(void* arg)
 {
-    int client_sock = (int)(intptr_t)arg;
+    int client_sock;
+    (void)arg;
 
-    handle_connection(client_sock);
-    g_session_active = false;
-    vTaskDelete(NULL);
+    for (;;) {
+        if (xQueueReceive(g_session_queue, &client_sock, portMAX_DELAY) == pdTRUE) {
+            handle_connection(client_sock);
+            g_session_active = false;
+        }
+    }
 }
 
 /* ---- listener task: accept-and-reject-if-busy, poll for IP first ----- */
@@ -435,10 +458,11 @@ static void wolfssh_spike_task(void* arg)
         }
 
         g_session_active = true;
-        if (xTaskCreate(connection_task, "wolfssh_session",
-                        WOLFSSH_SPIKE_TASK_STACK, (void*)(intptr_t)client_sock,
-                        WOLFSSH_SPIKE_TASK_PRIORITY, NULL) != pdPASS) {
-            ESP_LOGE(TAG, "failed to create session task");
+        if (xQueueSend(g_session_queue, &client_sock, 0) != pdTRUE) {
+            /* Queue depth is 1 and g_session_active gates every send, so
+             * this should never actually happen -- fail closed rather than
+             * leave the accepted socket open with nothing servicing it. */
+            ESP_LOGE(TAG, "failed to hand off session (queue full)");
             g_session_active = false;
             close(client_sock);
         }
@@ -512,6 +536,20 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
     wolfSSH_CTX_SetChannelReqShellCb(g_ctx, channel_req_shell_cb);
     wolfSSH_CTX_SetChannelReqExecCb(g_ctx, channel_req_exec_cb);
     wolfSSH_CTX_SetChannelReqSubsysCb(g_ctx, channel_req_subsys_cb);
+
+    /* Created once, here -- see connection_task()'s comment for why this
+     * is a persistent worker rather than spawned per connection. Must
+     * exist before wolfssh_spike_task() starts accepting, since its first
+     * accepted connection is handed off through this same queue. */
+    g_session_queue = xQueueCreate(1, sizeof(int));
+    if (g_session_queue == NULL) {
+        ESP_LOGE(TAG, "failed to create session queue");
+        wolfSSH_CTX_free(g_ctx);
+        g_ctx = NULL;
+        return;
+    }
+    xTaskCreate(connection_task, "wolfssh_session", WOLFSSH_SPIKE_TASK_STACK,
+                NULL, WOLFSSH_SPIKE_TASK_PRIORITY, NULL);
 
     xTaskCreate(wolfssh_spike_task, "wolfssh_spike", WOLFSSH_SPIKE_TASK_STACK,
                 NULL, WOLFSSH_SPIKE_TASK_PRIORITY, NULL);
