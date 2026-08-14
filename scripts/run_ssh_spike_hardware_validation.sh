@@ -22,21 +22,36 @@
 # scripts/test_ssh_spike_hardware_validation.sh.
 #
 # Usage:
-#   run_ssh_spike_hardware_validation.sh --mode default --host <ip>
+#   run_ssh_spike_hardware_validation.sh --mode default --host <ip> \
+#       --firmware-image <path>
 #   run_ssh_spike_hardware_validation.sh --mode experimental --host <ip> \
 #       --user flipper --identity <path> \
-#       --host-key-fingerprint SHA256:xxxxx [--cycles 100] \
-#       [--monitor-log <path>] [--evidence-dir <path>]
+#       --host-key-fingerprint SHA256:xxxxx --firmware-image <path> \
+#       [--cycles 100] [--monitor-log <path>] [--evidence-dir <path>]
 #
 # --dry-run validates arguments and prints the planned phase order without
 # touching the network, hardware, or any real key file.
 #
 # Never embeds, copies, or prints private-key material: the identity file
 # is only ever passed by path to `ssh -i`.
+#
+# --firmware-image (required unless --dry-run) binds this run's evidence to
+# an exact Git commit and firmware artifact: before any network check, the
+# script requires a clean tracked worktree/index, resolves the current Git
+# HEAD, and hashes the given image (SHA-256), writing all of it to a
+# mode-specific provenance file in the evidence directory. This script
+# cannot flash the board or read back what bytes it is actually running --
+# the provenance record states plainly that "this image was flashed" is an
+# operator attestation, not something observed. See
+# record_firmware_provenance() below and
+# docs/design/ssh-feasibility-spike.md's "Hardware validation procedure".
 set -euo pipefail
 IFS=$'\n\t'
 
 PROG=$(basename "$0")
+# Used to locate the Git repository this script lives in, regardless of the
+# operator's current working directory -- see record_firmware_provenance().
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- defaults -------------------------------------------------------------
 MODE=""
@@ -48,6 +63,7 @@ UART_PORT=3456
 SSH_USER="flipper"
 IDENTITY=""
 HOST_KEY_FINGERPRINT=""
+FIRMWARE_IMAGE=""
 CYCLES=100
 MONITOR_LOG=""
 EVIDENCE_DIR=""
@@ -72,14 +88,23 @@ REQUIRED_SKIP_COUNT=0
 usage() {
     cat <<'EOF'
 Usage:
-  run_ssh_spike_hardware_validation.sh --mode default --host <ip> [options]
+  run_ssh_spike_hardware_validation.sh --mode default --host <ip> \
+      --firmware-image <path> [options]
   run_ssh_spike_hardware_validation.sh --mode experimental --host <ip> \
       --user <name> --identity <path> --host-key-fingerprint <SHA256:...> \
+      --firmware-image <path> \
       [--cycles N] [--monitor-log <path>] [--evidence-dir <path>] [options]
 
-Required for every mode:
+Required for every mode (unless --dry-run):
   --mode {default|experimental}   Which firmware configuration is on the board.
   --host <ip-or-hostname>         Board address.
+  --firmware-image <path>         Path to the exact .bin flashed to the board
+                                   for this run. Hashed (SHA-256) and recorded
+                                   with the current Git HEAD in a
+                                   mode-specific provenance file before any
+                                   network check -- this script cannot verify
+                                   the board actually runs this image; that
+                                   remains an operator attestation.
 
 Required for --mode experimental (unless --dry-run):
   --user <name>                   SSH username (default: flipper).
@@ -465,6 +490,78 @@ check_port_closed() {
     else
         pass "$desc"
     fi
+}
+
+# ---- firmware provenance (both modes) --------------------------------------
+#
+# record_firmware_provenance <mode>
+#
+# Ties this run's PASS/FAIL evidence to an exact repository state and
+# firmware artifact -- without this, evidence collected against one board
+# state could later be mistaken for evidence about a different (e.g. later)
+# PR head, since flashing the board is a manual step this script never
+# observes. This function can only record what it *can* check from the
+# host side: the current Git HEAD, that the tracked worktree/index match
+# it, and the SHA-256 of the image file the operator says was flashed. It
+# cannot read back the board's actually-flashed bytes -- "this exact image
+# was flashed" is recorded explicitly as an operator attestation, not a
+# fact this script independently verified. Runs before any network check
+# in main(); see also FIRMWARE_IMAGE's usage() entry above.
+record_firmware_provenance() {
+    local mode="$1"
+    local out="$EVIDENCE_DIR/firmware_provenance_${mode}.txt"
+
+    if [[ ! -f "$FIRMWARE_IMAGE" || ! -r "$FIRMWARE_IMAGE" ]]; then
+        fail "firmware provenance ($mode): --firmware-image is not a regular readable file: $FIRMWARE_IMAGE"
+        return 1
+    fi
+
+    local repo_root
+    repo_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -z "$repo_root" ]]; then
+        fail "firmware provenance ($mode): could not determine the Git repository root from $SCRIPT_DIR -- is this script running from inside a Git checkout?"
+        return 1
+    fi
+
+    # The caller cannot supply the head -- it is only ever read from Git
+    # itself, and must be a full, unambiguous 40-character commit SHA.
+    local head
+    head="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
+    if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+        fail "firmware provenance ($mode): could not resolve a full 40-character Git HEAD commit SHA (got '${head:-<none>}')"
+        return 1
+    fi
+
+    # Tracked files and the index only -- untracked files are deliberately
+    # not part of this check (an ignored scratch file sitting in the
+    # worktree says nothing about what was built).
+    if ! git -C "$repo_root" diff --quiet || ! git -C "$repo_root" diff --cached --quiet; then
+        fail "firmware provenance ($mode): tracked files or the index are not clean -- refusing to attribute this evidence to Git HEAD $head while the working tree doesn't match it exactly"
+        return 1
+    fi
+
+    local sha256
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256="$(sha256sum "$FIRMWARE_IMAGE" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        sha256="$(shasum -a 256 "$FIRMWARE_IMAGE" | awk '{print $1}')"
+    else
+        skip_required "firmware provenance ($mode) (neither sha256sum nor shasum -a 256 is available to hash --firmware-image)"
+        return 1
+    fi
+
+    {
+        echo "mode=$mode"
+        echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "git_head=$head"
+        echo "tracked_worktree_and_index=clean"
+        echo "firmware_image_path=$FIRMWARE_IMAGE"
+        echo "firmware_image_sha256=$sha256"
+        echo "attestation=the operator running this script attests that the image at firmware_image_path (matching firmware_image_sha256 above) was flashed to the board before this run; this script has no way to read back or independently verify the board's actually-flashed bytes"
+    } > "$out"
+
+    pass "firmware provenance ($mode) recorded: git_head=$head firmware_image_sha256=$sha256 (see $out)"
+    return 0
 }
 
 # ---- shared helpers for experimental mode ----------------------------------
@@ -950,6 +1047,7 @@ while [[ $# -gt 0 ]]; do
         --user) SSH_USER="$2"; shift 2 ;;
         --identity) IDENTITY="$2"; shift 2 ;;
         --host-key-fingerprint) HOST_KEY_FINGERPRINT="$2"; shift 2 ;;
+        --firmware-image) FIRMWARE_IMAGE="$2"; shift 2 ;;
         --cycles) CYCLES="$2"; shift 2 ;;
         --monitor-log) MONITOR_LOG="$2"; shift 2 ;;
         --evidence-dir) EVIDENCE_DIR="$2"; shift 2 ;;
@@ -973,6 +1071,10 @@ if [[ "$MODE" != "default" && "$MODE" != "experimental" ]]; then
 fi
 if [[ -z "$HOST" ]]; then
     echo "error: --host is required" >&2
+    exit 2
+fi
+if [[ "$DRY_RUN" -eq 0 && -z "$FIRMWARE_IMAGE" ]]; then
+    echo "error: --firmware-image is required (unless --dry-run) -- this run's evidence must be attributable to an exact firmware artifact" >&2
     exit 2
 fi
 if [[ "$MODE" == "experimental" ]]; then
@@ -1011,6 +1113,10 @@ build_ssh_common_opts
 # ---- dry-run: print the plan, touch nothing else --------------------------
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "Dry run: arguments valid. Planned phases for --mode $MODE:"
+    echo "  0. Record firmware provenance (Git HEAD, tracked-worktree/index"
+    echo "     cleanliness, and --firmware-image SHA-256) before any network"
+    echo "     check -- not performed in --dry-run: no image path is read or"
+    echo "     hashed here, even if one was given."
     if [[ "$MODE" == "default" ]]; then
         cat <<EOF
   1. Confirm the board is reachable and identifiable via HTTP
@@ -1061,25 +1167,33 @@ fi
 log "evidence directory: $EVIDENCE_DIR"
 
 if [[ "$MODE" == "default" ]]; then
-    check_port_closed
-else
-    if verify_host_key_fingerprint; then
-        test_ping_success || true
-        test_algorithms || true
-        test_wrong_key_rejected || true
-        test_wrong_user_rejected || true
-        test_password_rejected || true
-        test_unknown_command_rejected || true
-        test_shell_rejected || true
-        test_pty_rejected || true
-        test_subsystem_rejected || true
-        test_forwarding_rejected || true
-        test_second_connection_rejected || true
-        test_reconnect_after_close || true
-        probe_coexistence || true
-        run_soak || true
+    if record_firmware_provenance "$MODE"; then
+        check_port_closed
     else
-        log "host-key fingerprint verification failed -- skipping all remaining checks rather than proceeding against an unverified host"
+        log "firmware provenance recording failed -- skipping remaining checks rather than proceeding without evidence attributable to a specific firmware artifact"
+    fi
+else
+    if record_firmware_provenance "$MODE"; then
+        if verify_host_key_fingerprint; then
+            test_ping_success || true
+            test_algorithms || true
+            test_wrong_key_rejected || true
+            test_wrong_user_rejected || true
+            test_password_rejected || true
+            test_unknown_command_rejected || true
+            test_shell_rejected || true
+            test_pty_rejected || true
+            test_subsystem_rejected || true
+            test_forwarding_rejected || true
+            test_second_connection_rejected || true
+            test_reconnect_after_close || true
+            probe_coexistence || true
+            run_soak || true
+        else
+            log "host-key fingerprint verification failed -- skipping all remaining checks rather than proceeding against an unverified host"
+        fi
+    else
+        log "firmware provenance recording failed -- skipping remaining checks rather than proceeding without evidence attributable to a specific firmware artifact"
     fi
     summarize_monitor_log || true
 fi

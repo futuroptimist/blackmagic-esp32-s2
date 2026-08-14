@@ -526,6 +526,23 @@ an unreachable board, a timeout, or a local argument error) is covered by
 against canned transcripts and PATH-injected fake tools — no real network
 or board involved there either.
 
+Because flashing the board is a manual step (below), otherwise-valid
+evidence from a run against one firmware/repository state could later be
+mistaken for evidence about a different one. To make that harder, every
+non-dry-run invocation requires `--firmware-image <path>` and, before any
+network check, records a mode-specific provenance file
+(`firmware_provenance_default.txt` / `firmware_provenance_experimental.txt`
+in `--evidence-dir`) containing the current Git `HEAD` (refusing to
+proceed if the tracked worktree/index aren't clean, or if `HEAD` isn't a
+full 40-character commit SHA) and the image's SHA-256. This is a
+host-side check only: the script cannot read back what the board is
+actually running, so the provenance file states plainly that "this exact
+image was flashed" is the *operator's* attestation, not something the
+script independently verified. **Maintainers reviewing hardware evidence
+must compare the `git_head` recorded in both provenance files against the
+PR head actually being merged** — evidence recorded against an older head
+does not establish anything about the current one.
+
 **Prerequisites** (all manual, not automated by the script):
 1. A Flipper Zero Wi-Fi Board reachable over the operator's local network,
    with its IP address or `.local` hostname known.
@@ -548,17 +565,23 @@ or board involved there either.
 **Invocation order:**
 ```console
 # 1. With the DEFAULT (SSH-disabled) firmware flashed:
-scripts/run_ssh_spike_hardware_validation.sh --mode default --host flipper.local
+scripts/run_ssh_spike_hardware_validation.sh --mode default --host flipper.local \
+    --firmware-image <path to the exact default build/blackmagic.bin just flashed> \
+    --evidence-dir <a directory to keep the transcripts/summaries in>
 
 # 2. Flash the EXPERIMENTAL firmware, then:
 scripts/run_ssh_spike_hardware_validation.sh --mode experimental \
     --host flipper.local --user flipper \
     --identity <path to the developer private key from gen_ssh_spike_keys.sh> \
     --host-key-fingerprint <fingerprint from prerequisite 3> \
+    --firmware-image <path to the exact experimental build-ssh-spike/blackmagic.bin just flashed> \
     --cycles 100 \
     --monitor-log <path to a serial capture taken during this run, if available> \
     --evidence-dir <a directory to keep the transcripts/summaries in>
 ```
+Each invocation's `--firmware-image` must be the file actually flashed for
+that run — the two runs use two different builds, so they get two
+distinct provenance files, not one shared between them.
 
 **Pass/fail interpretation:** the script prints a `PASS`/`FAIL`/`SKIP` line
 per check and a final `SUMMARY: pass=N fail=N skip=N required_skip=N` line.
@@ -644,9 +667,14 @@ marking [§9](#9-go-no-go-criteria)'s hardware-dependent items complete:
 `Pending hardware measurement` placeholders, and/or by attaching the
 script's `--evidence-dir` output to the PR): the script's final
 pass/fail/skip summary and exit code; per-check transcripts for any `FAIL`;
-the `soak_summary.txt` cycle counts; and, from `--monitor-log`, the actual
-numeric heap/largest-free-block/stack-watermark/handshake-duration values
-pulled from the device's own `ESP_LOGI` output — the script summarizes and
+the `soak_summary.txt` cycle counts; both
+`firmware_provenance_default.txt` and `firmware_provenance_experimental.txt`
+(each run's exact Git `HEAD`, clean-tracked-state confirmation, and
+firmware SHA-256, plus the operator's flashed-image attestation) with the
+recorded `git_head` values confirmed to match the PR head under review;
+and, from `--monitor-log`, the actual numeric
+heap/largest-free-block/stack-watermark/handshake-duration values pulled
+from the device's own `ESP_LOGI` output — the script summarizes and
 locates these lines for convenience, but the numbers themselves come from
 the board, not from this script's own observation.
 

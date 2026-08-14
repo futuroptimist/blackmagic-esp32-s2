@@ -221,6 +221,32 @@ echo "== --mode default: board-liveness gate (subprocess, fake curl/nc) =="
 FAKE_BIN="$WORKDIR/fakebin"
 mkdir -p "$FAKE_BIN"
 
+# Several regressions below invoke the validator as a real subprocess in a
+# non-dry-run mode, which (as of --firmware-image) always calls
+# record_firmware_provenance() before anything else -- that function reads
+# Git state from wherever the validator script itself lives (SCRIPT_DIR).
+# Running the *actual* checked-out validator would tie these tests to
+# whatever tracked/staged state this real working tree happens to be in at
+# test time (which is not always clean during development) -- copy the
+# validator into its own tiny, deterministic, single-commit throwaway repo
+# instead, so provenance recording always succeeds the same way regardless
+# of this actual repository's own state.
+CLEAN_VALIDATOR_REPO="$WORKDIR/clean_validator_repo"
+mkdir -p "$CLEAN_VALIDATOR_REPO"
+cp "$VALIDATOR" "$CLEAN_VALIDATOR_REPO/run_ssh_spike_hardware_validation.sh"
+chmod +x "$CLEAN_VALIDATOR_REPO/run_ssh_spike_hardware_validation.sh"
+(
+    cd "$CLEAN_VALIDATOR_REPO"
+    git init -q
+    git config user.email "test@example.invalid"
+    git config user.name "test"
+    git add run_ssh_spike_hardware_validation.sh
+    git commit -q -m "snapshot for testing"
+)
+CLEAN_VALIDATOR="$CLEAN_VALIDATOR_REPO/run_ssh_spike_hardware_validation.sh"
+DUMMY_FIRMWARE_IMAGE="$WORKDIR/dummy_firmware.bin"
+printf 'dummy firmware bytes for testing\n' > "$DUMMY_FIRMWARE_IMAGE"
+
 # Scenario: board unreachable (curl fails) -- must FAIL, and must never even
 # invoke the port-closed probe (an unreachable board must not be treated as
 # "SSH is correctly disabled").
@@ -237,8 +263,8 @@ FAKE_NC_EOF
 chmod +x "$FAKE_BIN/nc"
 
 set +e
-PATH="$FAKE_BIN:$PATH" "$VALIDATOR" --mode default --host 192.0.2.1 --http-port 80 \
-    --connect-timeout 1 > "$WORKDIR/out_unreachable.log" 2>&1
+PATH="$FAKE_BIN:$PATH" "$CLEAN_VALIDATOR" --mode default --host 192.0.2.1 --http-port 80 \
+    --firmware-image "$DUMMY_FIRMWARE_IMAGE" --connect-timeout 1 > "$WORKDIR/out_unreachable.log" 2>&1
 rc=$?
 set -e
 CHECK "unreachable board -> non-zero exit, not a false PASS" "1" "$rc"
@@ -269,8 +295,8 @@ FAKE_NC_CLOSED_EOF
 chmod +x "$FAKE_BIN/nc"
 
 set +e
-PATH="$FAKE_BIN:$PATH" "$VALIDATOR" --mode default --host 192.0.2.1 --http-port 80 \
-    --connect-timeout 1 > "$WORKDIR/out_closed.log" 2>&1
+PATH="$FAKE_BIN:$PATH" "$CLEAN_VALIDATOR" --mode default --host 192.0.2.1 --http-port 80 \
+    --firmware-image "$DUMMY_FIRMWARE_IMAGE" --connect-timeout 1 > "$WORKDIR/out_closed.log" 2>&1
 rc=$?
 set -e
 CHECK "reachable board + genuinely closed port -> exit 0" "0" "$rc"
@@ -283,8 +309,8 @@ FAKE_NC_OPEN_EOF
 chmod +x "$FAKE_BIN/nc"
 
 set +e
-PATH="$FAKE_BIN:$PATH" "$VALIDATOR" --mode default --host 192.0.2.1 --http-port 80 \
-    --connect-timeout 1 > "$WORKDIR/out_open.log" 2>&1
+PATH="$FAKE_BIN:$PATH" "$CLEAN_VALIDATOR" --mode default --host 192.0.2.1 --http-port 80 \
+    --firmware-image "$DUMMY_FIRMWARE_IMAGE" --connect-timeout 1 > "$WORKDIR/out_open.log" 2>&1
 rc=$?
 set -e
 CHECK "reachable board + OPEN port 2222 -> non-zero exit (FAIL, not a false pass)" "1" "$rc"
@@ -357,25 +383,135 @@ CHECK_TRUE "ssh-keyscan present, ssh-keygen missing -> the scan is never actuall
 # check for the wrong reason.
 SANDBOX_NO_KEYSCAN="$WORKDIR/sandbox_no_ssh_keyscan"
 mkdir -p "$SANDBOX_NO_KEYSCAN"
-for tool in env bash basename mktemp mkdir cat grep awk cp sleep tr rm ssh nc curl \
-        ssh-keygen timeout gtimeout; do
+for tool in env bash basename dirname mktemp mkdir cat grep awk cp sleep tr rm ssh nc curl \
+        ssh-keygen timeout gtimeout git sha256sum shasum date; do
     real="$(command -v "$tool" 2>/dev/null || true)"
     [[ -n "$real" ]] && ln -sf "$real" "$SANDBOX_NO_KEYSCAN/$tool"
 done
-# ssh-keyscan is deliberately not linked into this sandbox.
+# ssh-keyscan is deliberately not linked into this sandbox. git/sha256sum
+# (or shasum)/date are needed for record_firmware_provenance(), which now
+# runs before verify_host_key_fingerprint() -- see the CLEAN_VALIDATOR note
+# above for why $CLEAN_VALIDATOR (not the real checkout) is used here too.
 
 IDENTITY_FOR_HOSTKEY_TEST="$WORKDIR/fake_identity_hostkey"
 : > "$IDENTITY_FOR_HOSTKEY_TEST"
 set +e
-PATH="$SANDBOX_NO_KEYSCAN" "$VALIDATOR" --mode experimental --host 203.0.113.1 \
+PATH="$SANDBOX_NO_KEYSCAN" "$CLEAN_VALIDATOR" --mode experimental --host 203.0.113.1 \
     --user flipper --identity "$IDENTITY_FOR_HOSTKEY_TEST" \
     --host-key-fingerprint SHA256:doesnotmatter \
+    --firmware-image "$DUMMY_FIRMWARE_IMAGE" \
     > "$WORKDIR/out_missing_keyscan.log" 2>&1
 rc=$?
 set -e
 CHECK "end-to-end: missing ssh-keyscan -> whole run exits non-zero without --allow-incomplete-evidence" "1" "$rc"
 if grep -q "required_skip=1" "$WORKDIR/out_missing_keyscan.log"; then r=0; else r=1; fi
 CHECK_TRUE "end-to-end: missing ssh-keyscan -> summary reports exactly one required skip" "$r"
+
+echo
+echo "== record_firmware_provenance(): binds evidence to Git HEAD + firmware SHA-256 =="
+
+# make_test_git_repo <dir> -- a throwaway repo with exactly one tracked
+# file and one commit, so tests below know the exact expected HEAD.
+make_test_git_repo() {
+    local dir="$1"
+    mkdir -p "$dir"
+    (
+        cd "$dir"
+        git init -q
+        git config user.email "test@example.invalid"
+        git config user.name "test"
+        echo "tracked" > tracked_file.txt
+        git add tracked_file.txt
+        git commit -q -m "initial commit"
+    )
+}
+
+PROV_REPO="$WORKDIR/prov_repo"
+make_test_git_repo "$PROV_REPO"
+PROV_EXPECTED_HEAD="$(cd "$PROV_REPO" && git rev-parse HEAD)"
+
+PROV_IMAGE="$WORKDIR/prov_firmware.bin"
+printf 'firmware bytes for provenance testing\n' > "$PROV_IMAGE"
+if command -v sha256sum >/dev/null 2>&1; then
+    PROV_EXPECTED_SHA256="$(sha256sum "$PROV_IMAGE" | awk '{print $1}')"
+else
+    PROV_EXPECTED_SHA256="$(shasum -a 256 "$PROV_IMAGE" | awk '{print $1}')"
+fi
+
+PROV_EVIDENCE_DIR="$WORKDIR/prov_evidence"; mkdir -p "$PROV_EVIDENCE_DIR"
+EVIDENCE_DIR="$PROV_EVIDENCE_DIR"
+SCRIPT_DIR="$PROV_REPO"
+
+# A nonexistent --firmware-image must fail before doing anything else.
+PASS_COUNT=0; FAIL_COUNT=0
+FIRMWARE_IMAGE="$WORKDIR/this_image_does_not_exist.bin"
+set +e
+record_firmware_provenance "default"
+fn_rc=$?
+set -e
+CHECK "nonexistent --firmware-image -> function returns non-zero" "1" "$fn_rc"
+CHECK "nonexistent --firmware-image -> no PASS recorded" "0" "$PASS_COUNT"
+CHECK "nonexistent --firmware-image -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+# A clean repo + a real image must PASS and record the exact expected
+# Git HEAD and SHA-256 in the correct mode-specific evidence file.
+PASS_COUNT=0; FAIL_COUNT=0
+FIRMWARE_IMAGE="$PROV_IMAGE"
+set +e
+record_firmware_provenance "experimental"
+fn_rc=$?
+set -e
+CHECK "clean repo -> function returns success" "0" "$fn_rc"
+CHECK "clean repo -> recorded as PASS" "1" "$PASS_COUNT"
+CHECK "clean repo -> no FAIL" "0" "$FAIL_COUNT"
+PROV_OUT="$PROV_EVIDENCE_DIR/firmware_provenance_experimental.txt"
+if [[ -f "$PROV_OUT" ]]; then r=0; else r=1; fi
+CHECK_TRUE "clean repo -> mode-specific provenance file was written" "$r"
+if grep -q "^git_head=$PROV_EXPECTED_HEAD\$" "$PROV_OUT"; then r=0; else r=1; fi
+CHECK_TRUE "clean repo -> recorded git_head matches the repo's actual HEAD" "$r"
+if grep -q "^firmware_image_sha256=$PROV_EXPECTED_SHA256\$" "$PROV_OUT"; then r=0; else r=1; fi
+CHECK_TRUE "clean repo -> recorded SHA-256 matches the image's actual hash" "$r"
+if grep -q "^mode=experimental\$" "$PROV_OUT"; then r=0; else r=1; fi
+CHECK_TRUE "clean repo -> recorded mode matches the caller's mode argument" "$r"
+if grep -q "^attestation=.*attests that" "$PROV_OUT"; then r=0; else r=1; fi
+CHECK_TRUE "clean repo -> provenance file states the operator-attestation boundary explicitly" "$r"
+
+# A dirty *tracked* (unstaged) file must fail closed.
+echo "modified" >> "$PROV_REPO/tracked_file.txt"
+PASS_COUNT=0; FAIL_COUNT=0
+set +e
+record_firmware_provenance "default"
+fn_rc=$?
+set -e
+CHECK "dirty tracked (unstaged) file -> function returns non-zero" "1" "$fn_rc"
+CHECK "dirty tracked (unstaged) file -> no PASS recorded" "0" "$PASS_COUNT"
+CHECK "dirty tracked (unstaged) file -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+# A dirty *index* (staged but not committed) must also fail closed.
+( cd "$PROV_REPO" && git add tracked_file.txt )
+PASS_COUNT=0; FAIL_COUNT=0
+set +e
+record_firmware_provenance "default"
+fn_rc=$?
+set -e
+CHECK "dirty index (staged, uncommitted) -> function returns non-zero" "1" "$fn_rc"
+CHECK "dirty index (staged, uncommitted) -> no PASS recorded" "0" "$PASS_COUNT"
+CHECK "dirty index (staged, uncommitted) -> recorded as FAIL" "1" "$FAIL_COUNT"
+( cd "$PROV_REPO" && git checkout -q -- tracked_file.txt )
+
+echo
+echo "== missing --firmware-image fails before any network access =="
+
+set +e
+"$VALIDATOR" --mode default --host 203.0.113.1 --connect-timeout 1 \
+    > "$WORKDIR/out_missing_firmware_image.log" 2>&1
+rc=$?
+set -e
+CHECK "missing --firmware-image (non-dry-run) -> exit 2" "2" "$rc"
+if grep -q "evidence directory:" "$WORKDIR/out_missing_firmware_image.log"; then r=1; else r=0; fi
+CHECK_TRUE "missing --firmware-image -> no network/evidence phase was ever reached" "$r"
+if grep -q "firmware-image is required" "$WORKDIR/out_missing_firmware_image.log"; then r=0; else r=1; fi
+CHECK_TRUE "missing --firmware-image -> a clear error names the missing flag" "$r"
 
 echo
 echo "== summarize_monitor_log(): requires complete lifecycle/success/failure evidence =="
@@ -824,10 +960,11 @@ echo "== --dry-run is network- and key-independent =="
 set +e
 "$VALIDATOR" --dry-run --mode experimental --host 203.0.113.1 --user flipper \
     --identity /this/path/does/not/exist --host-key-fingerprint SHA256:whatever --cycles 5 \
+    --firmware-image /this/firmware/path/does/not/exist.bin \
     > "$WORKDIR/out_dryrun.log" 2>&1
 rc=$?
 set -e
-CHECK "dry-run succeeds with a nonexistent identity file and an unroutable host" "0" "$rc"
+CHECK "dry-run succeeds with a nonexistent identity file, nonexistent firmware image, and an unroutable host" "0" "$rc"
 
 # The experimental --dry-run plan's PTY entry must describe the same
 # contract test_pty_rejected() actually enforces: pty-req is acknowledged,
@@ -837,6 +974,16 @@ if grep -q "pty-req is acknowledged" "$WORKDIR/out_dryrun.log"; then r=0; else r
 CHECK_TRUE "experimental dry-run plan states pty-req is acknowledged" "$r"
 if grep -q "PTY allocation (-tt) -> expect protocol_rejected" "$WORKDIR/out_dryrun.log"; then r=1; else r=0; fi
 CHECK_TRUE "experimental dry-run plan no longer claims 'PTY allocation ... expect protocol_rejected'" "$r"
+
+# Dry-run must explain the firmware-provenance phase without ever reading
+# or hashing the (here, nonexistent) --firmware-image path -- succeeding
+# above already proves the nonexistent path wasn't required to exist; the
+# absence of any error mentioning it, plus the exit-0 CHECK above, is the
+# evidence that it was never read.
+if grep -q "Record firmware provenance" "$WORKDIR/out_dryrun.log"; then r=0; else r=1; fi
+CHECK_TRUE "dry-run plan explains the firmware-provenance phase" "$r"
+if grep -q "this firmware path does not exist\|/this/firmware/path/does/not/exist.bin" "$WORKDIR/out_dryrun.log"; then r=1; else r=0; fi
+CHECK_TRUE "dry-run never mentions/reads the nonexistent --firmware-image path" "$r"
 
 set +e
 "$VALIDATOR" --dry-run --mode default --host 203.0.113.1 > "$WORKDIR/out_dryrun_default.log" 2>&1
