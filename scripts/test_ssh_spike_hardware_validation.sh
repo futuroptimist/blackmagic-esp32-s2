@@ -378,6 +378,140 @@ if grep -q "required_skip=1" "$WORKDIR/out_missing_keyscan.log"; then r=0; else 
 CHECK_TRUE "end-to-end: missing ssh-keyscan -> summary reports exactly one required skip" "$r"
 
 echo
+echo "== summarize_monitor_log(): requires complete lifecycle/success/failure evidence =="
+
+EVIDENCE_DIR="$WORKDIR/evidence_monitor"; mkdir -p "$EVIDENCE_DIR"
+
+write_monitor_log() {
+    local file="$1"; shift
+    printf '%s\n' "$@" > "$file"
+}
+
+checkpoint_line() {
+    # checkpoint_line <name> -- a well-formed metric line for that category.
+    printf 'checkpoint=%s free_heap=100000 min_free_heap_since_boot=90000 largest_free_block=50000 stack_hwm=2000' "$1"
+}
+
+# A complete capture: all six lifecycle checkpoints plus one success and one
+# failure handshake/auth duration line.
+COMPLETE_MONITOR_LOG="$WORKDIR/monitor_complete.log"
+write_monitor_log "$COMPLETE_MONITOR_LOG" \
+    "$(checkpoint_line before_ssh_init)" \
+    "$(checkpoint_line after_listener_init)" \
+    "$(checkpoint_line before_handshake)" \
+    "$(checkpoint_line after_auth)" \
+    "$(checkpoint_line after_failed_handshake)" \
+    "$(checkpoint_line after_disconnect)" \
+    "handshake_auth_duration_ms=120 result=success" \
+    "handshake_auth_duration_ms=5000 result=failure"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG="$COMPLETE_MONITOR_LOG"
+summarize_monitor_log
+CHECK "complete capture (all 6 checkpoints + success/failure durations) -> PASS" "1" "$PASS_COUNT"
+CHECK "complete capture -> no FAIL" "0" "$FAIL_COUNT"
+
+# A one-line, checkpoint-only capture must not PASS.
+ONE_LINE_MONITOR_LOG="$WORKDIR/monitor_one_line.log"
+write_monitor_log "$ONE_LINE_MONITOR_LOG" "$(checkpoint_line before_ssh_init)"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG="$ONE_LINE_MONITOR_LOG"
+summarize_monitor_log
+CHECK "one-line checkpoint-only capture -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "one-line checkpoint-only capture -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+# A capture missing exactly one required lifecycle category (here,
+# after_disconnect) must still FAIL, one category at a time.
+for missing_cp in before_ssh_init after_listener_init before_handshake \
+        after_auth after_failed_handshake after_disconnect; do
+    MISSING_ONE_LOG="$WORKDIR/monitor_missing_${missing_cp}.log"
+    lines=()
+    for cp in before_ssh_init after_listener_init before_handshake \
+            after_auth after_failed_handshake after_disconnect; do
+        [[ "$cp" == "$missing_cp" ]] && continue
+        lines+=("$(checkpoint_line "$cp")")
+    done
+    lines+=("handshake_auth_duration_ms=120 result=success")
+    lines+=("handshake_auth_duration_ms=5000 result=failure")
+    write_monitor_log "$MISSING_ONE_LOG" "${lines[@]}"
+
+    PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+    MONITOR_LOG="$MISSING_ONE_LOG"
+    summarize_monitor_log
+    CHECK "capture missing only '$missing_cp' -> NOT recorded as PASS" "0" "$PASS_COUNT"
+    CHECK "capture missing only '$missing_cp' -> recorded as FAIL" "1" "$FAIL_COUNT"
+done
+
+# A capture with all six checkpoints but only a success (no failure)
+# duration line must FAIL, and vice versa.
+MISSING_FAILURE_LOG="$WORKDIR/monitor_missing_failure_duration.log"
+write_monitor_log "$MISSING_FAILURE_LOG" \
+    "$(checkpoint_line before_ssh_init)" \
+    "$(checkpoint_line after_listener_init)" \
+    "$(checkpoint_line before_handshake)" \
+    "$(checkpoint_line after_auth)" \
+    "$(checkpoint_line after_failed_handshake)" \
+    "$(checkpoint_line after_disconnect)" \
+    "handshake_auth_duration_ms=120 result=success"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG="$MISSING_FAILURE_LOG"
+summarize_monitor_log
+CHECK "capture with only a success duration (no failure) -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "capture with only a success duration (no failure) -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+MISSING_SUCCESS_LOG="$WORKDIR/monitor_missing_success_duration.log"
+write_monitor_log "$MISSING_SUCCESS_LOG" \
+    "$(checkpoint_line before_ssh_init)" \
+    "$(checkpoint_line after_listener_init)" \
+    "$(checkpoint_line before_handshake)" \
+    "$(checkpoint_line after_auth)" \
+    "$(checkpoint_line after_failed_handshake)" \
+    "$(checkpoint_line after_disconnect)" \
+    "handshake_auth_duration_ms=5000 result=failure"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG="$MISSING_SUCCESS_LOG"
+summarize_monitor_log
+CHECK "capture with only a failure duration (no success) -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "capture with only a failure duration (no success) -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+# Malformed metric lines (missing fields) must not satisfy a required
+# category, even though the checkpoint name and "result=" text appear.
+MALFORMED_LOG="$WORKDIR/monitor_malformed.log"
+write_monitor_log "$MALFORMED_LOG" \
+    "checkpoint=before_ssh_init free_heap=100000" \
+    "checkpoint=after_listener_init free_heap=100000 min_free_heap_since_boot=90000" \
+    "$(checkpoint_line before_handshake)" \
+    "$(checkpoint_line after_auth)" \
+    "$(checkpoint_line after_failed_handshake)" \
+    "$(checkpoint_line after_disconnect)" \
+    "handshake_auth_duration_ms=oops result=success" \
+    "handshake_auth_duration_ms=5000 result=failure"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG="$MALFORMED_LOG"
+summarize_monitor_log
+CHECK "malformed checkpoint/duration lines do not satisfy their category -> NOT recorded as PASS" "0" "$PASS_COUNT"
+CHECK "malformed checkpoint/duration lines do not satisfy their category -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+# Omitting --monitor-log remains an optional SKIP, not a FAIL.
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG=""
+summarize_monitor_log
+CHECK "omitted --monitor-log -> no PASS" "0" "$PASS_COUNT"
+CHECK "omitted --monitor-log -> no FAIL" "0" "$FAIL_COUNT"
+CHECK "omitted --monitor-log -> exactly one (optional) skip" "1" "$SKIP_COUNT"
+
+# A supplied but nonexistent path remains a FAIL, unchanged.
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+MONITOR_LOG="$WORKDIR/this_monitor_log_does_not_exist.log"
+summarize_monitor_log
+CHECK "nonexistent --monitor-log path -> no PASS" "0" "$PASS_COUNT"
+CHECK "nonexistent --monitor-log path -> recorded as FAIL" "1" "$FAIL_COUNT"
+
+echo
 echo "== test_forwarding_rejected(): uses -W, not the invalid -L port-0 form =="
 
 # Manually initialize the state main() would normally set up from argument

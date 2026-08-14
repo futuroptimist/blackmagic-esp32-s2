@@ -904,12 +904,35 @@ summarize_monitor_log() {
         grep -E 'handshake_auth_duration_ms=[0-9]+ result=(success|failure)' \
             "$MONITOR_LOG" || echo "(none found)"
     } > "$out"
-    local n
-    n=$(grep -cE 'checkpoint=|handshake_auth_duration_ms=' "$out" || true)
-    if [[ "$n" -gt 0 ]]; then
-        pass "serial monitor log summary written to $out ($n matching lines) -- copy these into design doc section 8 in place of 'Pending hardware measurement'"
+
+    # A supplied capture must contain complete, representative evidence --
+    # not merely "at least one matching line somewhere" -- before it is
+    # "ready to copy into design doc section 8": one line for each
+    # documented lifecycle checkpoint, plus at least one successful and one
+    # failed handshake/auth duration. Each category is matched against the
+    # full strict metric-line format (as extracted above), so a malformed
+    # line missing a field cannot satisfy it. Omitting --monitor-log
+    # entirely remains an optional SKIP (above); a *supplied* capture that
+    # is merely partial is a FAIL, not a PASS.
+    local -a missing=()
+    local cp
+    for cp in before_ssh_init after_listener_init before_handshake \
+              after_auth after_failed_handshake after_disconnect; do
+        if ! grep -qE "checkpoint=${cp} free_heap=[0-9]+ min_free_heap_since_boot=[0-9]+ largest_free_block=[0-9]+ stack_hwm=[0-9]+" "$MONITOR_LOG"; then
+            missing+=("checkpoint=$cp")
+        fi
+    done
+    if ! grep -qE 'handshake_auth_duration_ms=[0-9]+ result=success' "$MONITOR_LOG"; then
+        missing+=("handshake_auth_duration_ms ... result=success")
+    fi
+    if ! grep -qE 'handshake_auth_duration_ms=[0-9]+ result=failure' "$MONITOR_LOG"; then
+        missing+=("handshake_auth_duration_ms ... result=failure")
+    fi
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        pass "serial monitor log summary written to $out (complete lifecycle-checkpoint and success/failure duration evidence) -- copy these into design doc section 8 in place of 'Pending hardware measurement'"
     else
-        fail "serial monitor log given but no checkpoint/handshake-duration lines found in it -- was SSH actually exercised during this capture?"
+        fail "serial monitor log summary incomplete -- missing evidence for: ${missing[*]} (see $out); a partial capture is not sufficient evidence for design doc section 8"
     fi
 }
 
