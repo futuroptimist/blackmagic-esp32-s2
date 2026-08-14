@@ -290,6 +290,94 @@ set -e
 CHECK "reachable board + OPEN port 2222 -> non-zero exit (FAIL, not a false pass)" "1" "$rc"
 
 echo
+echo "== verify_host_key_fingerprint(): fail-closed missing-prerequisite handling =="
+
+# A missing ssh-keyscan/ssh-keygen is incomplete evidence (the check's own
+# prerequisite tool is unavailable), not an operational failure of the
+# check -- it must record a required skip, not a FAIL, and never a PASS.
+# Build a PATH-controlled sandbox so "command -v" genuinely fails to find
+# the omitted tool, rather than trying to shadow real system binaries.
+HOST="127.0.0.1"
+PORT="2222"
+CONNECT_TIMEOUT=5
+HOST_KEY_FINGERPRINT="SHA256:doesnotmatter"
+SCRATCH_DIR="$WORKDIR/scratch_hostkey"; mkdir -p "$SCRATCH_DIR"
+KNOWN_HOSTS="$SCRATCH_DIR/known_hosts"; : > "$KNOWN_HOSTS"
+
+EMPTY_TOOL_DIR="$WORKDIR/no_tools"
+mkdir -p "$EMPTY_TOOL_DIR"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0; REQUIRED_SKIP_COUNT=0
+set +e
+PATH="$EMPTY_TOOL_DIR" verify_host_key_fingerprint
+fn_rc=$?
+set -e
+CHECK "missing ssh-keyscan -> function returns non-zero" "1" "$fn_rc"
+CHECK "missing ssh-keyscan -> exactly one required skip" "1" "$REQUIRED_SKIP_COUNT"
+CHECK "missing ssh-keyscan -> exactly one skip overall" "1" "$SKIP_COUNT"
+CHECK "missing ssh-keyscan -> no PASS recorded" "0" "$PASS_COUNT"
+CHECK "missing ssh-keyscan -> no ordinary FAIL recorded" "0" "$FAIL_COUNT"
+
+# ssh-keyscan present but unused (only ssh-keygen is missing): a dummy that
+# would prove itself invoked via a sentinel file, so the "never invokes the
+# scan" requirement is checked directly rather than assumed.
+KEYSCAN_ONLY_DIR="$WORKDIR/keyscan_only_tools"
+mkdir -p "$KEYSCAN_ONLY_DIR"
+KEYSCAN_INVOKED_SENTINEL="$WORKDIR/keyscan_invoked"
+rm -f "$KEYSCAN_INVOKED_SENTINEL"
+cat > "$KEYSCAN_ONLY_DIR/ssh-keyscan" <<EOF
+#!/usr/bin/env bash
+: > "$KEYSCAN_INVOKED_SENTINEL"
+exit 0
+EOF
+chmod +x "$KEYSCAN_ONLY_DIR/ssh-keyscan"
+
+PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0; REQUIRED_SKIP_COUNT=0
+set +e
+PATH="$KEYSCAN_ONLY_DIR" verify_host_key_fingerprint
+fn_rc=$?
+set -e
+CHECK "ssh-keyscan present, ssh-keygen missing -> function returns non-zero" "1" "$fn_rc"
+CHECK "ssh-keyscan present, ssh-keygen missing -> exactly one required skip" "1" "$REQUIRED_SKIP_COUNT"
+CHECK "ssh-keyscan present, ssh-keygen missing -> exactly one skip overall" "1" "$SKIP_COUNT"
+CHECK "ssh-keyscan present, ssh-keygen missing -> no PASS recorded" "0" "$PASS_COUNT"
+CHECK "ssh-keyscan present, ssh-keygen missing -> no ordinary FAIL recorded" "0" "$FAIL_COUNT"
+if [[ -e "$KEYSCAN_INVOKED_SENTINEL" ]]; then r=1; else r=0; fi
+CHECK_TRUE "ssh-keyscan present, ssh-keygen missing -> the scan is never actually invoked" "$r"
+
+# End-to-end: without --allow-incomplete-evidence, a required skip from this
+# same missing-prerequisite path must leave the whole run's exit status
+# non-zero -- verified via a real subprocess invocation, not just the
+# function-level accounting above. A subprocess launch of the validator
+# needs its own ordinary startup tools (basename, mktemp, etc.) to still be
+# resolvable, so build a sandbox PATH that keeps real symlinks to every
+# other tool the script needs and omits only ssh-keyscan -- rather than an
+# empty PATH, which would make the process fail before ever reaching
+# verify_host_key_fingerprint() and falsely satisfy a bare "non-zero exit"
+# check for the wrong reason.
+SANDBOX_NO_KEYSCAN="$WORKDIR/sandbox_no_ssh_keyscan"
+mkdir -p "$SANDBOX_NO_KEYSCAN"
+for tool in env bash basename mktemp mkdir cat grep awk cp sleep tr rm ssh nc curl \
+        ssh-keygen timeout gtimeout; do
+    real="$(command -v "$tool" 2>/dev/null || true)"
+    [[ -n "$real" ]] && ln -sf "$real" "$SANDBOX_NO_KEYSCAN/$tool"
+done
+# ssh-keyscan is deliberately not linked into this sandbox.
+
+IDENTITY_FOR_HOSTKEY_TEST="$WORKDIR/fake_identity_hostkey"
+: > "$IDENTITY_FOR_HOSTKEY_TEST"
+set +e
+PATH="$SANDBOX_NO_KEYSCAN" "$VALIDATOR" --mode experimental --host 203.0.113.1 \
+    --user flipper --identity "$IDENTITY_FOR_HOSTKEY_TEST" \
+    --host-key-fingerprint SHA256:doesnotmatter \
+    > "$WORKDIR/out_missing_keyscan.log" 2>&1
+rc=$?
+set -e
+CHECK "end-to-end: missing ssh-keyscan -> whole run exits non-zero without --allow-incomplete-evidence" "1" "$rc"
+if grep -q "required_skip=1" "$WORKDIR/out_missing_keyscan.log"; then r=0; else r=1; fi
+CHECK_TRUE "end-to-end: missing ssh-keyscan -> summary reports exactly one required skip" "$r"
+
+echo
 echo "== test_forwarding_rejected(): uses -W, not the invalid -L port-0 form =="
 
 # Manually initialize the state main() would normally set up from argument

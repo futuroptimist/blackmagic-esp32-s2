@@ -471,8 +471,17 @@ check_port_closed() {
 
 verify_host_key_fingerprint() {
     local scan_out="$SCRATCH_DIR/keyscan.txt"
+    # Both tools are prerequisites this check's own contract depends on, not
+    # optional extras -- a missing one is incomplete evidence (see
+    # skip_required()'s doc comment above), not an operational failure of
+    # the check itself. ssh-keygen is checked here too, before ever
+    # attempting the scan, since it's needed to parse the result below.
     if ! command -v ssh-keyscan >/dev/null 2>&1; then
-        fail "host-key fingerprint verification (ssh-keyscan not available -- cannot proceed safely)"
+        skip_required "host-key fingerprint verification (ssh-keyscan not available -- cannot proceed safely)"
+        return 1
+    fi
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        skip_required "host-key fingerprint verification (ssh-keygen not available -- cannot parse the fetched host key)"
         return 1
     fi
     if ! run_with_timeout "$CONNECT_TIMEOUT" ssh-keyscan -p "$PORT" -t ecdsa-sha2-nistp256 "$HOST" \
