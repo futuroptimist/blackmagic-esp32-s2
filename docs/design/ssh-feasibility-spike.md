@@ -542,9 +542,21 @@ host-side check only: the script cannot read back what the board is
 actually running, so the provenance file states plainly that "this exact
 image was flashed" is the *operator's* attestation, not something the
 script independently verified. **Maintainers reviewing hardware evidence
-must compare the `git_head` recorded in both provenance files against the
-PR head actually being merged** — evidence recorded against an older head
-does not establish anything about the current one.
+must confirm the `git_head` recorded in both provenance files is
+acceptable for the PR head actually being merged.** It is acceptable if
+it is exactly that head, or if it is an ancestor of that head — confirmed
+with `git merge-base --is-ancestor <recorded_head> <PR_head>` (or
+equivalent), not assumed from commit order — where every path changed
+between the two (`git diff --stat <recorded_head>..<PR_head>`) is
+`docs/design/ssh-feasibility-spike.md`, and the diff itself only records
+the already-collected hardware results in place of `Pending hardware
+measurement` placeholders and go/no-go checkboxes. If that diff touches
+firmware, configuration, dependencies, workflows, the validation
+scripts/tests, the validation instructions themselves, or any other
+substantive content, the recorded evidence does not establish anything
+about the PR head and validation must be rerun. A recorded head that is
+neither the PR head nor such a results-only ancestor establishes nothing
+about the current one.
 
 **Prerequisites** (all manual, not automated by the script):
 1. A Flipper Zero Wi-Fi Board reachable over the operator's local network,
@@ -674,8 +686,10 @@ the `soak_summary.txt` cycle counts; both
 `firmware_provenance_default.txt` and `firmware_provenance_experimental.txt`
 (each run's exact Git `HEAD`, clean-tracked-state confirmation, and
 firmware SHA-256, plus the operator's flashed-image attestation) with the
-recorded `git_head` values confirmed to match the PR head under review;
-and, from `--monitor-log`, the actual numeric
+recorded `git_head` values confirmed acceptable for the PR head under
+review (that head, or a results-only ancestor of it — see "Hardware
+validation procedure" above); and, from `--monitor-log`, the actual
+numeric
 heap/largest-free-block/stack-watermark/handshake-duration values pulled
 from the device's own `ESP_LOGI` output — the script summarizes and
 locates these lines for convenience, but the numbers themselves come from
