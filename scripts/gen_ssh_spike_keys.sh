@@ -56,14 +56,22 @@ command -v ssh-keygen >/dev/null 2>&1 || { echo "error: ssh-keygen is required" 
 
 umask 077
 
-HOST_KEY_PEM="${ABS_OUTDIR}/embedded_host_key.pem"
+HOST_KEY_DER="${ABS_OUTDIR}/embedded_host_key.der"
 USER_KEY_PRIV="${ABS_OUTDIR}/id_ecdsa"
 USER_KEY_PUB="${ABS_OUTDIR}/id_ecdsa.pub"
 USER_KEY_BLOB="${ABS_OUTDIR}/authorized_key.blob"
 
-# Host key: classic SEC1 "EC PRIVATE KEY" PEM, loaded via
-# wolfSSH_CTX_UsePrivateKey_buffer(..., WOLFSSH_FORMAT_PEM).
-openssl ecparam -name prime256v1 -genkey -noout -out "${HOST_KEY_PEM}"
+# Host key: raw SEC1 "EC PRIVATE KEY" DER, loaded via
+# wolfSSH_CTX_UsePrivateKey_buffer(..., WOLFSSH_FORMAT_ASN1) -- not PEM.
+# The pinned wolfSSH's WOLFSSH_FORMAT_PEM path for private keys
+# (wolfSSH_ProcessBuffer() in src/internal.c) is compiled only under
+# #ifdef WOLFSSH_CERTS, which this spike does not define (no X.509
+# certificate support -- see components/wolfssh_spike/user_settings/
+# user_settings.h); passing PEM bytes with WOLFSSH_FORMAT_PEM in this
+# build falls through to WS_UNIMPLEMENTED_E instead of parsing them.
+# Generating DER directly and loading it via WOLFSSH_FORMAT_ASN1 uses a
+# path that works unconditionally.
+openssl ecparam -name prime256v1 -genkey -noout -outform DER -out "${HOST_KEY_DER}"
 
 # Authorized user key: a normal OpenSSH keypair. The developer uses
 # id_ecdsa with `ssh -i` to connect; the raw SSH wire-format public-key
@@ -77,7 +85,7 @@ awk '{print $2}' "${USER_KEY_PUB}" | base64 -d > "${USER_KEY_BLOB}"
 
 {
     echo "Generated disposable developer keys in: ${ABS_OUTDIR}"
-    echo "  Host private key            (WOLFSSH_SPIKE_HOST_KEY_PATH):       ${HOST_KEY_PEM}"
+    echo "  Host private key            (WOLFSSH_SPIKE_HOST_KEY_PATH):       ${HOST_KEY_DER}"
     echo "  Authorized key blob         (WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH): ${USER_KEY_BLOB}"
     echo "  Developer SSH private key   (for: ssh -i <this>):                ${USER_KEY_PRIV}"
     echo
@@ -87,5 +95,5 @@ awk '{print $2}' "${USER_KEY_PUB}" | base64 -d > "${USER_KEY_BLOB}"
     echo "  ssh -p 2222 -i ${USER_KEY_PRIV} flipper@<board-ip> ping"
 } >&2
 
-echo "export WOLFSSH_SPIKE_HOST_KEY_PATH=\"${HOST_KEY_PEM}\""
+echo "export WOLFSSH_SPIKE_HOST_KEY_PATH=\"${HOST_KEY_DER}\""
 echo "export WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=\"${USER_KEY_BLOB}\""

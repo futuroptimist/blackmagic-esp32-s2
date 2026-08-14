@@ -469,9 +469,22 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
         return;
     }
 
+    /* The embedded bytes are raw SEC1 EC PRIVATE KEY DER, not PEM --
+     * gen_ssh_spike_keys.sh generates DER directly, and this loads it as
+     * WOLFSSH_FORMAT_ASN1. The pinned wolfSSH's WOLFSSH_FORMAT_PEM path
+     * for private keys (wolfSSH_ProcessBuffer(), src/internal.c) is
+     * compiled only under #ifdef WOLFSSH_CERTS, which this spike does not
+     * define (no X.509 certificate support -- see user_settings.h);
+     * passing PEM bytes there falls through to WS_UNIMPLEMENTED_E instead
+     * of being parsed (confirmed on real hardware). The
+     * `_pem_start`/`_pem_end` symbol names below are unrelated to this
+     * file's actual encoding: CMakeLists.txt always copies whatever
+     * WOLFSSH_SPIKE_HOST_KEY_PATH points at into a fixed internal
+     * `embedded_host_key.pem` filename so the generated symbol names stay
+     * predictable regardless of the operator-supplied source filename. */
     if (wolfSSH_CTX_UsePrivateKey_buffer(g_ctx, embedded_host_key_pem_start,
                                           (word32)host_key_len,
-                                          WOLFSSH_FORMAT_PEM) != WS_SUCCESS) {
+                                          WOLFSSH_FORMAT_ASN1) != WS_SUCCESS) {
         ESP_LOGE(TAG, "failed to load embedded host key");
         wolfSSH_CTX_free(g_ctx);
         g_ctx = NULL;
