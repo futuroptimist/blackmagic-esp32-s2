@@ -952,6 +952,21 @@ run_soak() {
             cp "$out" "$EVIDENCE_DIR/soak_${i}_ok.out" 2>/dev/null || true
         fi
 
+        # A small gap between consecutive connection attempts: the board's
+        # own graceful shutdown (wolfSSH_shutdown() -- SendChannelEof/
+        # SendChannelExit/SendChannelClose, then wolfSSH_worker() waiting
+        # for the peer's own close acknowledgment, src/ssh.c) is a real
+        # protocol exchange that legitimately outlasts the client-visible
+        # round trip by up to roughly 200ms on this hardware; the one
+        # session/channel-at-a-time policy correctly treats a connection
+        # attempt inside that window as still-active and rejects it -- that
+        # is not a leak or degradation. Confirmed empirically: back-to-back
+        # attempts with no gap intermittently collide with this window,
+        # while a 200ms+ gap reliably avoids it every time; see
+        # test_reconnect_after_close(), which already sleeps 1s before its
+        # own single reconnect attempt for the same reason.
+        sleep 0.5
+
         out="$SCRATCH_DIR/soak_${i}_bad.out"
         set +e
         run_with_timeout "$COMMAND_TIMEOUT" ssh "${SSH_COMMON_OPTS[@]}" -i "$wrong_key" "$SSH_USER@$HOST" ping \
@@ -965,6 +980,9 @@ run_soak() {
             fail "soak cycle $i: expected-failure leg expected auth_rejected, got class=$class exit=$rc"
             cp "$out" "$EVIDENCE_DIR/soak_${i}_bad.out" 2>/dev/null || true
         fi
+
+        # Same rationale as the gap above, before the next cycle's leg.
+        sleep 0.5
     done
 
     {
