@@ -503,11 +503,14 @@ design and implementation, but it is not go for production, and it is not
 yet fully "go" for the spike itself, until an operator runs the checklist
 in the PR description on real hardware and records the results here in
 place of the `Pending hardware measurement` placeholders. Build-size
-figures above were measured locally against the pinned
+figures above are run-specific snapshots from the GitHub Actions CI jobs
+and heads cited in the table, each building against the pinned
 `espressif/idf:v4.4.8` Docker image; ccache state, host OS, and Docker
 version can shift object layout by a handful of bytes between runs on
-different machines, so treat them as representative rather than bit-for-bit
-invariant across every environment.
+different machines, so treat them as representative rather than
+bit-for-bit invariant across every environment, and treat current
+exact-head CI as the validation authority for any change that affects the
+firmware.
 
 ### Hardware validation procedure
 
