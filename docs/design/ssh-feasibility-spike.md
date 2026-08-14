@@ -469,9 +469,9 @@ client                          ESP32-S2 (wolfssh_spike task)
 | Metric | Value | Source |
 | --- | --- | --- |
 | Default build size (SSH disabled) | 965,008 bytes (baseline, pre-existing) | `build/blackmagic.bin`, read before this spike's changes |
-| Default build size after this spike's changes | 964,432 bytes (54% of factory partition free) | Local `idf.py build` (ESP-IDF v4.4.8 Docker image), unchanged apart from normal version-string/build-date drift; zero wolfSSH/wolfSSL objects in the build tree |
-| Experimental build size (SSH enabled) | 1,060,784 bytes / `0x102fb0` (49% of factory partition free, 1,036,368 bytes headroom) | Local `idf.py build` with `CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y`, separate build dir + sdkconfig overlay, ephemeral developer keys |
-| Flash delta (experimental vs. default) | +96,352 bytes (~94 KiB) | Difference between the two rows above |
+| Default build size after this spike's changes | 964,784 bytes / `0xeb8b0` (54% of factory partition free) | GitHub Actions CI run `31773868176` (head `b46f10d`), `build` job's `idf.py build` output (ESP-IDF v4.4.8 Docker image); unchanged apart from normal version-string/build-date drift, zero wolfSSH/wolfSSL objects in the build tree |
+| Experimental build size (SSH enabled) | 1,060,608 bytes / `0x102f00` (49% of factory partition free, 1,036,544 bytes headroom) | GitHub Actions CI run `31773868176` (head `b46f10d`), `build-experimental-ssh-spike` job's `idf.py build` output with `CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y`, separate build dir + sdkconfig overlay, ephemeral CI-generated keys |
+| Flash delta (experimental vs. default) | +95,824 bytes (~93.6 KiB) | Difference between the two rows above |
 | `libwolfssh_spike.a` size (wolfCrypt + wolfSSH + this spike's own code + embedded keys) | 94,704 bytes (82,127 text + 12,577 rodata + 25 data) | `idf.py size-components` on the experimental build |
 | Internal heap before SSH init | Pending hardware measurement | `esp_get_free_heap_size()` at the `before_ssh_init` checkpoint, which fires before `wolfSSH_Init()` or any wolfSSH allocation |
 | Heap after listener initialization | Pending hardware measurement | `esp_get_free_heap_size()` at the `after_listener_init` checkpoint |
@@ -652,13 +652,14 @@ the board, not from this script's own observation.
 
 ## 9. Go/no-go criteria
 
-- [x] Default build and behavior remain unchanged (verified: 964,432-byte
+- [x] Default build and behavior remain unchanged (verified: 964,784-byte
       image, zero wolfSSH/wolfSSL objects anywhere in the default build
       tree; source-level behavior unchanged since main.c's only change is
-      inside `#if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER`, default `n`).
+      inside `#if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER`, default `n`; CI run
+      `31773868176`, head `b46f10d`).
 - [x] Experimental build fits the application partition with documented
-      headroom (verified: 1,060,784 bytes, 49% of the 2 MB factory
-      partition free).
+      headroom (verified: 1,060,608 bytes, 49% of the 2 MB factory
+      partition free; CI run `31773868176`, head `b46f10d`).
 - [x] No credentials or private keys are committed anywhere in the PR
       (verified: `scripts/gen_ssh_spike_keys.sh` writes only outside the
       repository; local build verification used keys generated to a
