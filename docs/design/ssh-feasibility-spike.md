@@ -641,7 +641,7 @@ about the current one.
    `WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH` pointed at them (see AGENTS.md and
    [§6](#6-prototype-architecture)).
 3. The expected host-key fingerprint, computed once locally right after key
-   generation: `ssh-keygen -lf <embedded_host_key.pem-derived public key>`
+   generation: `ssh-keygen -lf <embedded_host_key.der-derived public key>`
    (or read it back from the device's own serial log at boot, if the
    firmware ever logs it — check before assuming). This value is what
    `--host-key-fingerprint` pins against; the script refuses to proceed at

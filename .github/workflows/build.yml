@@ -189,7 +189,7 @@ jobs:
             -v "$PWD:/project" \
             -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
             -w /project \
-            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.pem \
+            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.der \
             -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
             espressif/idf:v4.4.8 \
             bash -c "idf.py -B build-ssh-spike -D SDKCONFIG_DEFAULTS='sdkconfig;sdkconfig.ci-ssh-spike' -D SDKCONFIG=build-ssh-spike/sdkconfig build"
@@ -200,7 +200,7 @@ jobs:
             -v "$PWD:/project" \
             -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
             -w /project \
-            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.pem \
+            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.der \
             -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
             espressif/idf:v4.4.8 \
             bash -c "idf.py -B build-ssh-spike size && idf.py -B build-ssh-spike size-components"
