@@ -359,7 +359,12 @@ class_in() {
 # same client-side message confirmed above.
 channel_request_failed() {
     local out_file="$1" request_type="$2"
-    grep -qE "^${request_type} request failed on channel [0-9]+\$" "$out_file"
+    # The trailing \r? tolerates a CRLF-terminated line: confirmed on real
+    # hardware that ssh(1) can emit this exact message with a trailing
+    # carriage return before the newline on some connections, which a
+    # bare [0-9]+$ anchor does not match (the \r sits between the last
+    # digit and grep's own end-of-line point).
+    grep -qE "^${request_type} request failed on channel [0-9]+"$'\r'"?\$" "$out_file"
 }
 
 # channel_open_failed <out_file> <reason>

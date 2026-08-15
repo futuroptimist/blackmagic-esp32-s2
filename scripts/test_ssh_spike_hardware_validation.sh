@@ -136,6 +136,18 @@ CHECK_TRUE "genuine 'exec request failed on channel' line is detected" "$r"
 if channel_request_failed "$t" "shell"; then r=1; else r=0; fi
 CHECK_TRUE "'exec request failed' does not also satisfy a 'shell' evidence check" "$r"
 
+# Confirmed on real hardware: ssh(1) can emit this exact refusal line
+# CRLF-terminated (a trailing \r before the newline) on some connections --
+# a bare [0-9]+$ anchor does not match that, even though the message text
+# is genuinely present.
+t="$WORKDIR/t_execfail_crlf.out"
+write_transcript "$t" \
+    'debug1: Connecting to host [1.2.3.4] port 2222.' \
+    'Authenticated to host ([1.2.3.4]:2222) using "publickey".' \
+    $'exec request failed on channel 0\r'
+if channel_request_failed "$t" "exec"; then r=0; else r=1; fi
+CHECK_TRUE "genuine 'exec request failed on channel' line is detected even when CRLF-terminated" "$r"
+
 t="$WORKDIR/t_execran.out"
 write_transcript "$t" \
     'debug1: Connecting to host [1.2.3.4] port 2222.' \
