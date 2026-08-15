@@ -845,6 +845,19 @@ test_second_connection_rejected() {
         skip_required "second-simultaneous-connection rejection (nc not available to hold a raw connection open)"
         return
     fi
+    # This holder connection doesn't go through run_ssh() (it's a raw `nc`
+    # connect, not an ssh invocation), so it needs the same pre-connection
+    # gap directly -- see run_ssh()'s comment. Without it, a preceding
+    # test's session could still be in its brief graceful-shutdown tail
+    # when this holder connects: the board would (correctly) reject the
+    # holder as a second-simultaneous connection, but the holder's own
+    # stderr still reports the raw TCP connect as "succeeded" (that part
+    # happens before the board's application logic runs) -- so the
+    # confirmation check below would pass on a holder that was actually
+    # rejected and closed immediately, freeing the slot early enough for
+    # the real "second" connection below to be treated as the first and
+    # succeed instead of being rejected.
+    sleep 0.5
     # g_session_active is set the instant accept() returns, before the SSH
     # handshake even begins -- so a raw, silent TCP connection is enough to
     # occupy the one allowed slot for the hold duration. Use `nc -v` (BSD
