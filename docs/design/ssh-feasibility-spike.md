@@ -641,9 +641,20 @@ about the current one.
    `WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH` pointed at them (see AGENTS.md and
    [§6](#6-prototype-architecture)).
 3. The expected host-key fingerprint, computed once locally right after key
-   generation: `ssh-keygen -lf <embedded_host_key.der-derived public key>`
-   (or read it back from the device's own serial log at boot, if the
-   firmware ever logs it — check before assuming). This value is what
+   generation. `$WOLFSSH_SPIKE_HOST_KEY_PATH` is a raw SEC1 EC **private**
+   key in DER form (see prerequisite 2), which `ssh-keygen -lf` cannot read
+   directly — it needs an OpenSSH-format **public** key. Derive one and
+   fingerprint it in one pipeline; this reads and derives public-key
+   material only and never prints the private key itself:
+   ```console
+   openssl pkey -inform DER -in "$WOLFSSH_SPIKE_HOST_KEY_PATH" -pubout 2>/dev/null \
+       | ssh-keygen -i -m PKCS8 -f /dev/stdin \
+       | ssh-keygen -lf /dev/stdin
+   ```
+   The second field of that output (the `SHA256:...` token) is the value
+   to pass to `--host-key-fingerprint` below. (Alternatively, read the
+   fingerprint back from the device's own serial log at boot, if the
+   firmware ever logs it — check before assuming.) This value is what
    `--host-key-fingerprint` pins against; the script refuses to proceed at
    all if the board's actual host key doesn't match it, rather than
    trust-on-first-use blindly accepting whatever key the board presents.
