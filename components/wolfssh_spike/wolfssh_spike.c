@@ -548,9 +548,31 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
         g_ctx = NULL;
         return;
     }
-    xTaskCreate(connection_task, "wolfssh_session", WOLFSSH_SPIKE_TASK_STACK,
-                NULL, WOLFSSH_SPIKE_TASK_PRIORITY, NULL);
 
-    xTaskCreate(wolfssh_spike_task, "wolfssh_spike", WOLFSSH_SPIKE_TASK_STACK,
-                NULL, WOLFSSH_SPIKE_TASK_PRIORITY, NULL);
+    TaskHandle_t session_task_handle = NULL;
+    if (xTaskCreate(connection_task, "wolfssh_session",
+                     WOLFSSH_SPIKE_TASK_STACK, NULL,
+                     WOLFSSH_SPIKE_TASK_PRIORITY,
+                     &session_task_handle) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create session worker task");
+        vQueueDelete(g_session_queue);
+        g_session_queue = NULL;
+        wolfSSH_CTX_free(g_ctx);
+        g_ctx = NULL;
+        g_session_active = false;
+        return;
+    }
+
+    if (xTaskCreate(wolfssh_spike_task, "wolfssh_spike",
+                     WOLFSSH_SPIKE_TASK_STACK, NULL,
+                     WOLFSSH_SPIKE_TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create listener task");
+        vTaskDelete(session_task_handle);
+        vQueueDelete(g_session_queue);
+        g_session_queue = NULL;
+        wolfSSH_CTX_free(g_ctx);
+        g_ctx = NULL;
+        g_session_active = false;
+        return;
+    }
 }
