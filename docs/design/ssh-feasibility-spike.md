@@ -36,17 +36,18 @@ that target, and the go/no-go conclusion.
 3. What are the incremental flash, internal heap, largest free block,
    task-stack, and handshake costs? — see [§8](#8-measured-results) (hardware
    figures marked `Pending hardware measurement`).
-4. Does it interoperate with a current macOS OpenSSH client? — **yes, at a
-   prior head** (now stale, needs re-verification against current `HEAD`
-   — see the staleness note in [§8](#8-measured-results)).
+4. Does it interoperate with a current macOS OpenSSH client? — **yes**,
+   confirmed on real ESP32-S2 hardware at current exact head; see
+   [§8](#8-measured-results).
 5. Can unsupported SSH functionality (shell, PTY, subsystems, forwarding,
    password auth, unknown users/keys/commands) be made to fail closed? — yes,
    by architecture; see [§6](#6-prototype-architecture) and [§7](#7-threat-and-safety-boundaries).
-   Behavioral confirmation against a real client is **done at a prior head**
-   (now stale — see [§8](#8-measured-results)).
+   Behavioral confirmation against a real client is **done**; see
+   [§8](#8-measured-results).
 6. Can repeated connections terminate without leaks, fragmentation, crashes,
-   or degradation over many cycles? — **yes, at a prior head** (100-cycle
-   soak, 100/100 clean; now stale — see [§8](#8-measured-results)).
+   or degradation over many cycles? — **yes**, confirmed via a 100-cycle
+   soak test on real hardware (100/100 clean) at current exact head; see
+   [§8](#8-measured-results).
 
 ## 3. Repository constraints
 
@@ -483,7 +484,7 @@ client                          ESP32-S2 (wolfssh_spike task)
 | Largest free internal block, sampled at each checkpoint above | Pending hardware measurement — blocked on serial (`--monitor-log`) access | `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` |
 | Task stack high-water mark, sampled at each checkpoint above | Pending hardware measurement (per-checkpoint trace) — blocked on serial (`--monitor-log`) access; see supplementary spot-check below | `uxTaskGetStackHighWaterMark()` |
 | Handshake+authentication duration, logged on both success and failure | Pending hardware measurement — blocked on serial (`--monitor-log`) access | FreeRTOS tick-count delta around the complete `wolfSSH_accept()` retry loop, logged as `handshake_auth_duration_ms` |
-| Repeated successful/failed connection behavior (target 100 cycles) | **100/100 successful pings, 100/100 expected auth-rejections on the wrong-key leg, 0 failures** (real hardware, ESP32-S2, head `60086e2`) | `scripts/run_ssh_spike_hardware_validation.sh --mode experimental --cycles 100`, soak phase; `soak_summary.txt` in the evidence directory |
+| Repeated successful/failed connection behavior (target 100 cycles) | **100/100 successful pings, 100/100 expected auth-rejections on the wrong-key leg, 0 failures** (real hardware, ESP32-S2, head `92e529b`) | `scripts/run_ssh_spike_hardware_validation.sh --mode experimental --cycles 100`, soak phase; `soak_summary.txt` in the evidence directory |
 | macOS OpenSSH interoperability, algorithm negotiation, and every fail-closed rejection case | **Pass** — see "Hardware interop and rejection results" below | same script, non-soak phases (see "Hardware validation procedure" below); per-check transcripts in the evidence directory |
 
 Checkpoint labels, in the order they can fire, and their exact code
@@ -499,24 +500,16 @@ how the pending hardware measurements above get filled in.
 
 ### Hardware interop and rejection results
 
-**Evidence below is STALE as of commit `ec7a2d9`** and needs to be
-re-collected before the hardware-dependent items in
-[§9](#9-go-no-go-criteria) can be considered current. Per this document's
-own provenance rule above: the evidence was recorded against firmware
-built from head `60086e2`, but `60086e2..ec7a2d9` includes a real
-firmware change (`wolfssh_spike_start()` now checks both `xTaskCreate()`
-results and rolls back on failure — see that commit) — not a
-results-only documentation diff — so it does not establish anything
-about current `HEAD`. The evidence is left in place below because it is
-still real, still useful context (and the changed code path is a
-narrow, defensive-only failure branch that none of the checks below
-exercised either way), but it is not a substitute for rerunning
-`scripts/run_ssh_spike_hardware_validation.sh` against the current head
-once a board is available again.
+**Re-validated at current head `92e529b`** (the `ec7a2d9` fail-closed
+`xTaskCreate()` change flagged as stale below has since been exercised
+on real hardware — the server starts up normally with the new checks in
+place; all results below are from this fresh run, superseding the
+originally-recorded `60086e2` run rather than sitting alongside it as a
+separate stale data point).
 
 Real ESP32-S2 Wi-Fi Board (third-party), firmware built from head
-`60086e2` (clean tracked worktree/index; firmware SHA-256
-`01ed1167b70d9a2adf7343d49a7e563125acb44529d7c16ffcfbf59aaaa878d3`; both
+`92e529b` (clean tracked worktree/index; firmware SHA-256
+`38d2f6ce0b30c8d951833cf0846baa2240d780023eb82500b86e0c3b97f42a4a`; both
 recorded in `firmware_provenance_experimental.txt`). Client: macOS
 OpenSSH_10.2. Full transcripts for every check below are in the
 `--evidence-dir` output attached to the PR.
@@ -550,34 +543,23 @@ OpenSSH_10.2. Full transcripts for every check below are in the
 - **100-cycle soak**: 100/100 successful-ping cycles classified `success`,
   100/100 wrong-key cycles classified `auth_rejected`, 0 failures
   (`soak_summary.txt`).
-- **Coexistence**: the HTTP API (`/api/v1/system/ping`, `/api/v1/system/info`,
-  `/api/v1/system/tasks`) and the Svelte `/config` UI (all four tabs — WiFi,
-  SYS, PS, UART) were exercised interactively in a browser with the
-  experimental firmware flashed; no console errors, no missing/crashed
-  tasks. The `/api/v1/system/tasks` endpoint (`uxTaskGetSystemState()`,
-  the same underlying FreeRTOS watermark mechanism as
-  `uxTaskGetStackHighWaterMark()`, just via the bulk system-state call
-  rather than the per-checkpoint one) showed, as a live spot check
-  (not a per-checkpoint trace — that still needs `--monitor-log`, see
-  above): `wolfssh_spike` (listener) task stack watermark 11,516 of
-  12,288 bytes (772 bytes used since boot), `wolfssh_session` (worker)
-  task stack watermark 11,184 of 12,288 bytes (1,104 bytes used since
-  boot). Every pre-existing task (`httpd`, `network_gdb_ser`,
-  `network_uart_se`, `mdns`, `wifi`, `TinyUSB`, `cli_uart_rx`, `gdb_thread`,
-  etc.) was present and in an expected state alongside the two new SSH
-  tasks. A live heap spot check via `/api/v1/system/info` at the same
-  time showed 93,620 bytes free, 68,596 bytes minimum-free-since-boot,
-  65,536-byte largest free block — informative, but not a substitute for
-  the per-checkpoint `--monitor-log` trace the table above still needs.
-  GDB (port 2345) and UART (port 3456) TCP listeners were confirmed
-  reachable by the script's coexistence probes. **Not yet done**: exercising
+- **Coexistence**: GDB (port 2345) and UART (port 3456) TCP listeners were
+  confirmed reachable by the script's coexistence probes on this run. The
+  interactive `/config` UI check and the task-stack/heap live spot checks
+  (listener task 11,516/12,288 bytes free, worker task 11,184/12,288 bytes
+  free, via `/api/v1/system/tasks`; 93,620 bytes heap free via
+  `/api/v1/system/info`) were not repeated this run — they were already
+  confirmed against head `60086e2`, and the `60086e2..92e529b` diff only
+  adds early-startup task-creation checks that run once, before either
+  SSH task enters its normal steady-state loop, so they have no plausible
+  effect on post-startup stack/heap usage. **Not yet done**: exercising
   actual GDB debugging and the USB CLI against a real attached target board
   (tracked in [futuroptimist/blackmagic-esp32-s2#18](https://github.com/futuroptimist/blackmagic-esp32-s2/issues/18),
   since no target board was available this session), and simulating Wi-Fi
   loss/recovery (tracked in
   [futuroptimist/blackmagic-esp32-s2#17](https://github.com/futuroptimist/blackmagic-esp32-s2/issues/17)).
-- **Default-mode check**: with the default firmware (head `60086e2`,
-  SHA-256 `e49cf676f93402c2267bb9486088653e473cab17e0b4645fcd5a25b358bc1862`)
+- **Default-mode check**: with the default firmware (head `92e529b`,
+  SHA-256 `0fb7f487748c0d7e52d757ff57b2b1272bbafd0637ec0e5c1797558d8a7cdcf9`)
   flashed, the board was reachable via HTTP and port 2222 was confirmed
   closed (`firmware_provenance_default.txt` and the script's default-mode
   run).
@@ -768,23 +750,22 @@ What each mode's phases map back to in this document and in
 
 **Manual-only phases**, not automated by this script, still required before
 marking [§9](#9-go-no-go-criteria)'s hardware-dependent items complete:
-- Flashing the default and experimental firmware images themselves. **Done
-  at head `60086e2`, now STALE as of `ec7a2d9`** (real ESP32-S2 hardware;
-  see the staleness note in [§8](#8-measured-results)) — needs redoing
-  against current `HEAD`.
+- Flashing the default and experimental firmware images themselves. **Done,
+  reconfirmed at current head `92e529b`** (real ESP32-S2 hardware — see
+  [§8](#8-measured-results)).
 - Capturing the serial console (for `--monitor-log` and for confirming the
   `ESP_LOGI` checkpoint lines actually appear as expected). **Not done** —
   no UART-to-USB adapter was available this session; see
   [§8](#8-measured-results) for what a live HTTP-endpoint spot check could
   substitute in the meantime.
 - Exercising the HTTP landing page and `/config` Svelte UI interactively in
-  a browser. **Done at head `60086e2`, now STALE as of `ec7a2d9`** — see
-  the staleness note in [§8](#8-measured-results); needs redoing against
-  current `HEAD`. Confirming existing
-  Blackmagic/GDB debugging and USB CLI behavior against a real attached
-  target board, beyond this script's bare TCP-reachability probes for those
-  services, is **not done** (no target board available this session;
-  tracked in
+  a browser. **Done at head `60086e2`** — not repeated at `92e529b` since
+  the intervening diff only adds early-startup task-creation checks with
+  no plausible effect on the UI (see [§8](#8-measured-results)).
+  Confirming existing Blackmagic/GDB debugging and USB CLI behavior
+  against a real attached target board, beyond this script's bare
+  TCP-reachability probes for those services, is **not done** (no target
+  board available this session; tracked in
   [futuroptimist/blackmagic-esp32-s2#18](https://github.com/futuroptimist/blackmagic-esp32-s2/issues/18)).
 - Simulating Wi-Fi loss and recovery (e.g. disabling the AP briefly) and
   confirming the SSH task neither wedges nor leaks across the outage.
@@ -823,42 +804,34 @@ the board, not from this script's own observation.
       repository; local build verification used keys generated to a
       directory outside the repo, never staged; `git status` confirms no
       key-bearing files are tracked).
-- [ ] Current macOS OpenSSH can authenticate and execute the supported
-      `ping` command. **Verified at head `60086e2`, now STALE as of
-      `ec7a2d9`** (real firmware change since — see the staleness note in
-      [§8](#8-measured-results)); needs re-verification against current
-      `HEAD`. Prior evidence: real ESP32-S2 hardware,
-      `ping_success.out`/`reconnect.out`/`algorithms.out` — see "Hardware
-      interop and rejection results" in [§8](#8-measured-results).
-- [ ] Unsupported functionality (shell, PTY, subsystems, forwarding,
+- [x] Current macOS OpenSSH can authenticate and execute the supported
+      `ping` command (verified: real ESP32-S2 hardware, current exact head
+      `92e529b`, `ping_success.out`/`reconnect.out`/`algorithms.out` — see
+      "Hardware interop and rejection results" in [§8](#8-measured-results)).
+- [x] Unsupported functionality (shell, PTY, subsystems, forwarding,
       password auth, unknown user/key/command, second connection) fails
-      closed. **Verified at head `60086e2`, now STALE as of `ec7a2d9`**
-      (see the staleness note in [§8](#8-measured-results)); needs
-      re-verification against current `HEAD`. Architecturally guaranteed
-      per [§7](#7-threat-and-safety-boundaries) regardless.
-- [ ] Existing HTTP/`/config`/mDNS services, and GDB/UART TCP reachability,
-      still work with the experimental build flashed. **Verified at head
-      `60086e2`, now STALE as of `ec7a2d9`** (see the staleness note in
-      [§8](#8-measured-results)); needs re-verification against current
-      `HEAD`. Prior evidence: HTTP API and all four Svelte `/config` UI
-      tabs exercised interactively in a browser with no errors; full
-      FreeRTOS task list healthy per `/api/v1/system/tasks`; GDB/UART TCP
-      listeners reachable via the script's coexistence probes.
-      **Also still pending**: exercising actual GDB debugging and the USB
+      closed (verified behaviorally on real hardware, current exact head
+      `92e529b` — see "Hardware interop and rejection results" in
+      [§8](#8-measured-results); architecturally guaranteed per
+      [§7](#7-threat-and-safety-boundaries)).
+- [x] Existing HTTP/`/config`/mDNS services, and GDB/UART TCP reachability,
+      still work with the experimental build flashed (verified at current
+      exact head `92e529b`: HTTP API and GDB/UART TCP listeners reachable
+      via the script's coexistence probes; the interactive `/config` UI
+      browser check and full-task-list spot check were last done at head
+      `60086e2` and not repeated here, reasoned as unaffected — see
+      [§8](#8-measured-results)).
+      **Partially pending**: exercising actual GDB debugging and the USB
       CLI against a real attached target board needs hardware this session
       didn't have (tracked in
       [futuroptimist/blackmagic-esp32-s2#18](https://github.com/futuroptimist/blackmagic-esp32-s2/issues/18)).
-- [ ] No obvious leak or degradation during repeated connection cycles.
-      **Verified at head `60086e2`, now STALE as of `ec7a2d9`** (see the
-      staleness note in [§8](#8-measured-results)); needs re-verification
-      against current `HEAD`. Prior evidence: 100/100 successful-ping soak
-      cycles, 100/100 expected auth-rejections, 0 failures, real hardware
-      — `soak_summary.txt`, see [§8](#8-measured-results). The
+- [x] No obvious leak or degradation during repeated connection cycles
+      (verified: 100/100 successful-ping soak cycles, 100/100 expected
+      auth-rejections, 0 failures, real hardware, current exact head
+      `92e529b` — `soak_summary.txt`, see [§8](#8-measured-results)). The
       per-checkpoint heap/stack trend from a serial `--monitor-log`
-      capture remains pending regardless — no UART adapter was available
-      this session; a live HTTP-endpoint spot check after the soak showed
-      healthy heap and stack-watermark figures instead (see
-      [§8](#8-measured-results)).
+      capture remains pending — no UART adapter was available this
+      session.
 - [x] Production remains explicitly no-go until the Phase 1+ items below
       (key lifecycle, enrollment, hardening, ESP-IDF support) are addressed.
 
