@@ -10,3 +10,9 @@
 [submodule "components/dap-link/free-dap"]
 	path = components/dap-link/free-dap
 	url = https://github.com/ataradov/free-dap
+[submodule "components/wolfssh_spike/wolfssl"]
+	path = components/wolfssh_spike/wolfssl
+	url = https://github.com/wolfSSL/wolfssl.git
+[submodule "components/wolfssh_spike/wolfssh"]
+	path = components/wolfssh_spike/wolfssh
+	url = https://github.com/wolfSSL/wolfssh.git

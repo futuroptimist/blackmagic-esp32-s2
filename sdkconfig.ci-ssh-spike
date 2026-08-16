@@ -1,0 +1,11 @@
+# sdkconfig overlay for the experimental wolfSSH-spike CI build only.
+#
+# Used as: idf.py -B build-ssh-spike \
+#            -D SDKCONFIG_DEFAULTS="sdkconfig;sdkconfig.ci-ssh-spike" \
+#            -D SDKCONFIG=build-ssh-spike/sdkconfig \
+#            build
+#
+# This never touches the canonical root `sdkconfig` (seeded from it, but
+# written to a separate build directory's own sdkconfig) -- see AGENTS.md
+# and docs/design/ssh-feasibility-spike.md.
+CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y

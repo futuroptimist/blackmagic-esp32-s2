@@ -1,0 +1,24 @@
+menu "wolfSSH feasibility spike"
+
+    config EXPERIMENTAL_WOLFSSH_SERVER
+        bool "Enable experimental wolfSSH server (feasibility spike)"
+        default n
+        help
+            Builds and starts a minimal, single-session SSH server on TCP
+            port 2222, authenticating exactly one public key and accepting
+            exactly one exec command ("ping" -> "pong"). Everything else
+            (shell, PTY, subsystems, SFTP/SCP, forwarding, password auth) is
+            rejected. This is an experimental feasibility spike, not a
+            production feature -- see docs/design/ssh-feasibility-spike.md.
+
+            When disabled (the default), wolfSSL/wolfSSH are not compiled or
+            linked, and no key files are required to build.
+
+            When enabled, the build requires two environment variables
+            pointing at externally-supplied key files:
+              WOLFSSH_SPIKE_HOST_KEY_PATH        (ECDSA P-256 host private key)
+              WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH  (ECDSA P-256 authorized public key)
+            See scripts/gen_ssh_spike_keys.sh to generate disposable
+            developer keys outside the repository.
+
+endmenu

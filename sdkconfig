@@ -1297,6 +1297,12 @@ CONFIG_WPA_MBEDTLS_CRYPTO=y
 # CONFIG_WPA_MBO_SUPPORT is not set
 # CONFIG_WPA_DPP_SUPPORT is not set
 # end of Supplicant
+
+#
+# wolfSSH feasibility spike
+#
+# CONFIG_EXPERIMENTAL_WOLFSSH_SERVER is not set
+# end of wolfSSH feasibility spike
 # end of Component config
 
 #

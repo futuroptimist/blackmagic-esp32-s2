@@ -1,5 +1,6 @@
 .vscode
 /build
+/build-ssh-spike
 /sdkconfig.old
 /main/wifi-credentials.h
 .DS_Store

@@ -123,3 +123,98 @@ jobs:
               -F "branch=${BRANCH_NAME}" \
               ${FILES[@]} \
               "${{ secrets.INDEXER_URL }}"/blackmagic-firmware/uploadfiles
+
+  # Native (host-compiled, no ESP-IDF) tests for the wolfSSH-spike's pure
+  # policy functions. See AGENTS.md and docs/design/ssh-feasibility-spike.md.
+  wolfssh-spike-policy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout code'
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: 'Run policy unit tests'
+        run: scripts/run_policy_tests.sh
+
+      - name: 'Run hardware-validation-runner regression tests'
+        run: scripts/test_ssh_spike_hardware_validation.sh
+
+  # Experimental, SSH-enabled build (CONFIG_EXPERIMENTAL_WOLFSSH_SERVER=y).
+  # Entirely separate from the default build/job above: uses its own build
+  # directory and sdkconfig overlay so the canonical root `sdkconfig` is
+  # never touched, generates ephemeral developer keys that are never
+  # committed or uploaded, and does not affect default-build pass/fail.
+  # See docs/design/ssh-feasibility-spike.md.
+  build-experimental-ssh-spike:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout code'
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: 'Checkout submodules'
+        run:
+          git submodule update --init --recursive --depth 1 --jobs "$(getconf _NPROCESSORS_ONLN)";
+
+      - name: 'Setup node'
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: components/svelte-portal
+
+      - name: 'Install node dependencies'
+        run: npm install
+        working-directory: components/svelte-portal
+
+      - name: 'Build captive portal'
+        run: npm run build
+        working-directory: components/svelte-portal
+
+      - name: 'Generate ephemeral SSH spike keys'
+        run: |
+          mkdir -p "$RUNNER_TEMP/wolfssh-spike-keys"
+          # gen_ssh_spike_keys.sh prints `export NAME="value"` lines (for
+          # local `eval`); GITHUB_ENV wants plain `NAME=value`.
+          ./scripts/gen_ssh_spike_keys.sh "$RUNNER_TEMP/wolfssh-spike-keys" \
+            | sed -E 's/^export //; s/"//g' >> "$GITHUB_ENV"
+
+      - name: 'Build experimental (SSH-enabled) firmware'
+        run: |
+          docker run --rm \
+            -v "$PWD:/project" \
+            -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
+            -w /project \
+            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.der \
+            -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
+            espressif/idf:v4.4.8 \
+            bash -c "idf.py -B build-ssh-spike -D SDKCONFIG_DEFAULTS='sdkconfig;sdkconfig.ci-ssh-spike' -D SDKCONFIG=build-ssh-spike/sdkconfig build"
+
+      - name: 'Report experimental build size'
+        run: |
+          docker run --rm \
+            -v "$PWD:/project" \
+            -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
+            -w /project \
+            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.der \
+            -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
+            espressif/idf:v4.4.8 \
+            bash -c "idf.py -B build-ssh-spike size && idf.py -B build-ssh-spike size-components"
+
+      - name: 'Confirm canonical sdkconfig untouched'
+        run: git diff --exit-code -- sdkconfig
+
+      - name: 'Confirm no key-bearing files are tracked'
+        run: |
+          if git status --porcelain | grep -E '\.(pem|der|key|blob|pub)$'; then
+            echo "Key-bearing files appear to be tracked/staged" >&2
+            exit 1
+          fi
+
+      - name: 'Discard experimental (key-bearing) build outputs'
+        if: always()
+        run: sudo rm -rf -- "$GITHUB_WORKSPACE/build-ssh-spike" "$RUNNER_TEMP/wolfssh-spike-keys"

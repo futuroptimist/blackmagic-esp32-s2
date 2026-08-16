@@ -167,9 +167,21 @@ spike against:
 - maintenance status and macOS OpenSSH interoperability; and
 - compatibility with this project's GPLv3 licensing.
 
-The exact library and algorithms remain an explicit decision until primary
-documentation and a reproducible build establish the claims. Do not infer
-compatibility or licensing from a library name alone.
+This decision is made, not open: the feasibility spike below records the
+selected library with primary documentation and a reproducible build.
+Confirming or expanding the supported algorithm set for a production-ready
+configuration remains open and is tracked as Phase 1 ("Supported platform
+and cryptographic foundation") in
+[`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md)'s phased roadmap,
+not here. Do not infer compatibility or licensing from a library name alone.
+
+A first reproducible spike against these criteria is recorded in
+[`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md): wolfSSH/wolfSSL,
+pinned to specific tagged releases, built as a disabled-by-default prototype
+that authenticates one public key and answers one exec command. That
+document is the completed decision record for the library choice; treat it
+as the current source of truth for dependency versions, licensing
+conclusions, and measured (or pending) resource costs.
 
 ## Runtime and failure behavior
 
@@ -216,8 +228,13 @@ into the trusted LAN instead of forwarding the SSH port from the Internet.
 
 ## Verification and rollout
 
-All client commands below are **proposed examples only; SSH is not currently
-implemented**:
+All client commands below are **proposed examples for this production
+design; they are not implemented**. A disabled-by-default, `ping`-only
+feasibility prototype exists (see
+[`ssh-feasibility-spike.md`](./ssh-feasibility-spike.md)), but production
+SSH — including the management shell and the `device_info`/`flipper-log`
+commands shown below — is not, and these examples are not a claim about
+default or current firmware behavior:
 
 ```console
 $ ssh -i ~/.ssh/flipper_id flipper@flipper.local
@@ -266,7 +283,8 @@ management-plane hardening is not part of this SSH proposal.
 
 ## Open decisions
 
-- SSH library and supported algorithms.
+- Production-phase supported algorithm set beyond the feasibility spike's
+  restricted profile (see `ssh-feasibility-spike.md`'s Phase 1).
 - Default port.
 - Maximum authorized keys and sessions.
 - Enrollment and physical-presence mechanism.
