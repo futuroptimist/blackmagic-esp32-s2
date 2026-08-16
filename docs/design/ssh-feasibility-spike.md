@@ -37,7 +37,7 @@ that target, and the go/no-go conclusion.
    task-stack, and handshake costs? — see [§8](#8-measured-results) (hardware
    figures marked `Pending hardware measurement`).
 4. Does it interoperate with a current macOS OpenSSH client? — **yes**,
-   confirmed on real ESP32-S2 hardware at current exact head; see
+   confirmed on real ESP32-S2 hardware at the recorded validation head; see
    [§8](#8-measured-results).
 5. Can unsupported SSH functionality (shell, PTY, subsystems, forwarding,
    password auth, unknown users/keys/commands) be made to fail closed? — yes,
@@ -46,8 +46,8 @@ that target, and the go/no-go conclusion.
    [§8](#8-measured-results).
 6. Can repeated connections terminate without leaks, fragmentation, crashes,
    or degradation over many cycles? — **yes**, confirmed via a 100-cycle
-   soak test on real hardware (100/100 clean) at current exact head; see
-   [§8](#8-measured-results).
+   soak test on real hardware (100/100 clean) at the recorded validation
+   head; see [§8](#8-measured-results).
 
 ## 3. Repository constraints
 
@@ -500,19 +500,23 @@ how the pending hardware measurements above get filled in.
 
 ### Hardware interop and rejection results
 
-**Re-validated at current head `92e529b`** (the `ec7a2d9` fail-closed
-`xTaskCreate()` change flagged as stale below has since been exercised
-on real hardware — the server starts up normally with the new checks in
-place; all results below are from this fresh run, superseding the
+**Recorded validation head: `92e529b`.** This re-validates the `ec7a2d9`
+fail-closed `xTaskCreate()` change on real hardware — the server starts
+up normally with the new checks in place — superseding the
 originally-recorded `60086e2` run rather than sitting alongside it as a
-separate stale data point).
+separate data point. Per the provenance rule above, this evidence also
+covers any later PR head for which `92e529b` is an ancestor and every
+intervening change is confined to this results-recording document
+itself; it does not cover a head that changes firmware, configuration,
+dependencies, workflows, or the validation scripts/tests.
 
 Real ESP32-S2 Wi-Fi Board (third-party), firmware built from head
 `92e529b` (clean tracked worktree/index; firmware SHA-256
 `38d2f6ce0b30c8d951833cf0846baa2240d780023eb82500b86e0c3b97f42a4a`; both
 recorded in `firmware_provenance_experimental.txt`). Client: macOS
-OpenSSH_10.2. Full transcripts for every check below are in the
-`--evidence-dir` output attached to the PR.
+OpenSSH_10.2. Full transcripts for every check below are retained by the
+operator who ran the validation (`--evidence-dir`), not attached to the
+PR itself.
 
 - **Ping round trip**: `ssh -p 2222 flipper@<host> ping` authenticated via
   publickey and returned exactly `pong` with exit status 0
@@ -751,8 +755,8 @@ What each mode's phases map back to in this document and in
 **Manual-only phases**, not automated by this script, still required before
 marking [§9](#9-go-no-go-criteria)'s hardware-dependent items complete:
 - Flashing the default and experimental firmware images themselves. **Done,
-  reconfirmed at current head `92e529b`** (real ESP32-S2 hardware — see
-  [§8](#8-measured-results)).
+  reconfirmed at recorded validation head `92e529b`** (real ESP32-S2
+  hardware — see [§8](#8-measured-results)).
 - Capturing the serial console (for `--monitor-log` and for confirming the
   `ESP_LOGI` checkpoint lines actually appear as expected). **Not done** —
   no UART-to-USB adapter was available this session; see
@@ -805,29 +809,30 @@ the board, not from this script's own observation.
       directory outside the repo, never staged; `git status` confirms no
       key-bearing files are tracked).
 - [x] Current macOS OpenSSH can authenticate and execute the supported
-      `ping` command (verified: real ESP32-S2 hardware, current exact head
-      `92e529b`, `ping_success.out`/`reconnect.out`/`algorithms.out` — see
-      "Hardware interop and rejection results" in [§8](#8-measured-results)).
+      `ping` command (verified: real ESP32-S2 hardware, recorded validation
+      head `92e529b`, `ping_success.out`/`reconnect.out`/`algorithms.out` —
+      see "Hardware interop and rejection results" in
+      [§8](#8-measured-results)).
 - [x] Unsupported functionality (shell, PTY, subsystems, forwarding,
       password auth, unknown user/key/command, second connection) fails
-      closed (verified behaviorally on real hardware, current exact head
-      `92e529b` — see "Hardware interop and rejection results" in
+      closed (verified behaviorally on real hardware, recorded validation
+      head `92e529b` — see "Hardware interop and rejection results" in
       [§8](#8-measured-results); architecturally guaranteed per
       [§7](#7-threat-and-safety-boundaries)).
 - [x] Existing HTTP/`/config`/mDNS services, and GDB/UART TCP reachability,
-      still work with the experimental build flashed (verified at current
-      exact head `92e529b`: HTTP API and GDB/UART TCP listeners reachable
-      via the script's coexistence probes; the interactive `/config` UI
-      browser check and full-task-list spot check were last done at head
-      `60086e2` and not repeated here, reasoned as unaffected — see
-      [§8](#8-measured-results)).
+      still work with the experimental build flashed (verified at recorded
+      validation head `92e529b`: HTTP API and GDB/UART TCP listeners
+      reachable via the script's coexistence probes; the interactive
+      `/config` UI browser check and full-task-list spot check were last
+      done at head `60086e2` and not repeated here, reasoned as unaffected
+      — see [§8](#8-measured-results)).
       **Partially pending**: exercising actual GDB debugging and the USB
       CLI against a real attached target board needs hardware this session
       didn't have (tracked in
       [futuroptimist/blackmagic-esp32-s2#18](https://github.com/futuroptimist/blackmagic-esp32-s2/issues/18)).
 - [x] No obvious leak or degradation during repeated connection cycles
       (verified: 100/100 successful-ping soak cycles, 100/100 expected
-      auth-rejections, 0 failures, real hardware, current exact head
+      auth-rejections, 0 failures, real hardware, recorded validation head
       `92e529b` — `soak_summary.txt`, see [§8](#8-measured-results)). The
       per-checkpoint heap/stack trend from a serial `--monitor-log`
       capture remains pending — no UART adapter was available this
