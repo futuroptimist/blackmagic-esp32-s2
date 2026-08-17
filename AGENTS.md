@@ -72,6 +72,10 @@ the host compiler, no ESP-IDF toolchain required:
   ```shell
   scripts/run_ssh_keystore_codec_tests.sh
   ```
+- NVS initialization recovery policy in `main/nvs_recovery_policy.c`:
+  ```shell
+  scripts/run_nvs_recovery_policy_tests.sh
+  ```
 
 There is no ESP-IDF-hosted unit test framework (no Unity/cmocka) here. If you
 add more pure logic worth testing this way, prefer extending this pattern

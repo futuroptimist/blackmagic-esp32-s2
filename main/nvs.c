@@ -18,15 +18,18 @@ esp_err_t nvs_init(void) {
 
     ESP_LOGI(TAG, "init " NVS_STORE);
     ret = nvs_flash_init_partition(NVS_STORE);
+    bool ssh_enabled = false;
+#ifdef CONFIG_EXPERIMENTAL_WOLFSSH_SERVER
+    ssh_enabled = true;
+#endif
     const bool recovery_error =
         ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND;
-    if(nvs_storage_should_auto_erase(CONFIG_EXPERIMENTAL_WOLFSSH_SERVER,
-                                     recovery_error)) {
+    if(nvs_storage_should_auto_erase(ssh_enabled, recovery_error)) {
         ESP_LOGI(TAG, "erasing " NVS_STORE);
         ESP_ERROR_CHECK(nvs_flash_erase_partition(NVS_STORE));
         ret = nvs_flash_init_partition(NVS_STORE);
     }
-    if(CONFIG_EXPERIMENTAL_WOLFSSH_SERVER && recovery_error) {
+    if(ssh_enabled && recovery_error) {
         ESP_LOGE(TAG, "preserving " NVS_STORE
                  " after unexpected initialization failure; trusted factory reset required");
         return ret;
