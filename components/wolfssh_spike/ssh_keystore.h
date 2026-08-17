@@ -32,7 +32,7 @@ extern "C" {
 
 /* Loads the persisted host private key (raw SEC1 "EC PRIVATE KEY" DER) from
  * NVS, or generates a fresh ECDSA P-256 key on-device (via wolfCrypt's
- * wc_ecc_make_key(), seeded from the ESP-IDF hardware RNG) and persists it
+ * wc_ecc_make_key_ex(), seeded from the ESP-IDF hardware RNG) and persists it
  * if none exists yet.
  *
  * Fails closed on any state other than "key absent": a stored blob that
@@ -49,7 +49,8 @@ extern "C" {
 esp_err_t ssh_keystore_load_or_generate_host_key(
     uint8_t* der_out, size_t der_out_cap, size_t* der_len_out);
 
-/* Loads the persisted authorized-key SSH wire-format blob from NVS, or
+/* Future-facing API (not currently called by user_auth_cb()): loads the
+ * persisted authorized-key SSH wire-format blob from NVS, or
  * seeds NVS from `seed_blob` (the build-time-embedded key -- real
  * enrollment is Phase 2, out of scope here) if none exists yet. Same
  * fail-closed behavior on corruption as the host-key function above.

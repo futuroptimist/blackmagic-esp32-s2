@@ -65,14 +65,20 @@ void app_main(void) {
     led_init();
     led_set_blue(255);
 
-    nvs_init();
+    esp_err_t nvs_status = nvs_init();
     network_init();
     network_http_server_init();
     network_gdb_server_init();
     network_uart_server_init();
 
 #if CONFIG_EXPERIMENTAL_WOLFSSH_SERVER
-    wolfssh_spike_start(network_get_ip);
+    if(nvs_status == ESP_OK) {
+        wolfssh_spike_start(network_get_ip);
+    } else {
+        ESP_LOGE(TAG, "SSH disabled until trusted factory reset repairs NVS");
+    }
+#else
+    (void)nvs_status;
 #endif
 
     usb_init();

@@ -12,13 +12,12 @@
  * itself guarantees no torn writes across that single call (a read after
  * an interrupted write returns either the old value or the new one, never
  * a mix), which is what makes each update atomic. What NVS's own
- * guarantees do NOT cover is semantic/schema validation: a
+ * guarantees do NOT cover is envelope validation: a
  * structurally-valid NVS blob can still be the wrong schema version, the
- * wrong key type, or a payload that fails to parse as the key material it
- * claims to be. schema_version/key_type/payload_len/crc32 exist to catch
- * exactly that class of corruption before any of the bytes are handed to
- * wolfCrypt/wolfSSH -- see ssh_keystore_validate_host_key_blob() and
- * ssh_keystore_validate_auth_key_blob().
+ * wrong key type, or damaged payload. schema_version/key_type/payload_len/
+ * crc32 validate that envelope before bytes are handed onward. They do not
+ * semantically parse key material; wolfCrypt's host-key decode and wolfSSH's
+ * authorized-key handling provide the final fail-closed semantic check.
  */
 #ifndef WOLFSSH_SPIKE_SSH_KEYSTORE_CODEC_H
 #define WOLFSSH_SPIKE_SSH_KEYSTORE_CODEC_H

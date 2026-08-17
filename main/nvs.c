@@ -1,11 +1,12 @@
 #include <nvs_flash.h>
 #include <esp_log.h>
 #include "nvs.h"
+#include "nvs_recovery_policy.h"
 
 #define TAG "nvs"
 #define NVS_STORE "nvs_storage"
 
-void nvs_init(void) {
+esp_err_t nvs_init(void) {
     ESP_LOGI(TAG, "init " NVS_DEFAULT_PART_NAME);
     esp_err_t ret = nvs_flash_init_partition(NVS_DEFAULT_PART_NAME);
     if(ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -17,14 +18,23 @@ void nvs_init(void) {
 
     ESP_LOGI(TAG, "init " NVS_STORE);
     ret = nvs_flash_init_partition(NVS_STORE);
-    if(ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    const bool recovery_error =
+        ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND;
+    if(nvs_storage_should_auto_erase(CONFIG_EXPERIMENTAL_WOLFSSH_SERVER,
+                                     recovery_error)) {
         ESP_LOGI(TAG, "erasing " NVS_STORE);
         ESP_ERROR_CHECK(nvs_flash_erase_partition(NVS_STORE));
         ret = nvs_flash_init_partition(NVS_STORE);
     }
+    if(CONFIG_EXPERIMENTAL_WOLFSSH_SERVER && recovery_error) {
+        ESP_LOGE(TAG, "preserving " NVS_STORE
+                 " after unexpected initialization failure; trusted factory reset required");
+        return ret;
+    }
     ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "init done");
+    return ESP_OK;
 }
 
 void nvs_erase(void) {

@@ -30,8 +30,9 @@ endif()
 #
 # The host key is generated on-device and NVS-persisted (see
 # ssh_keystore.c) -- no build-time host key input anymore. The single
-# authorized key is still supplied externally, as the first-boot NVS seed
-# (real enrollment is Phase 2). Never read from a path inside the
+# authorized key is still supplied externally and compared directly by
+# user_auth_cb(); the future-facing NVS seeding API is not wired yet (real
+# enrollment is Phase 2). Never read from a path inside the
 # repository, and never fall back to a bundled default key. See
 # docs/design/ssh-feasibility-spike.md and scripts/gen_ssh_spike_keys.sh.
 if(NOT DEFINED ENV{WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH} OR "$ENV{WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH}" STREQUAL "")
