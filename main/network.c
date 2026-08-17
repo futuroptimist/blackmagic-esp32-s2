@@ -44,14 +44,22 @@ uint32_t network_get_ip(void) {
     return ip_info.ip.addr;
 }
 
+static int sta_retry_count = 0;
+
 static void
     sta_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
+        if(sta_retry_count < WIFI_MAXIMUM_RETRY) {
+            sta_retry_count++;
+            esp_wifi_connect();
+        } else {
+            ESP_LOGW(TAG, "giving up on STA connect after %d retries", sta_retry_count);
+        }
     } else if(event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)event_data;
+        sta_retry_count = 0;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     }
 }
