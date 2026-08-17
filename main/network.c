@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <freertos/event_groups.h>
+#include <freertos/timers.h>
 #include <string.h>
 #include <m-string.h>
 #include <mdns.h>
@@ -27,7 +28,8 @@
     })
 #endif
 
-#define WIFI_MAXIMUM_RETRY 3
+#define WIFI_MAXIMUM_BACKOFF_EXPONENT 3
+#define WIFI_RECONNECT_BASE_DELAY_MS 1000
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
 
@@ -44,14 +46,44 @@ uint32_t network_get_ip(void) {
     return ip_info.ip.addr;
 }
 
+static int sta_retry_count = 0;
+static TimerHandle_t sta_reconnect_timer = NULL;
+static StaticTimer_t sta_reconnect_timer_buffer;
+
+static void sta_schedule_reconnect(void) {
+    uint32_t delay_ms = WIFI_RECONNECT_BASE_DELAY_MS << sta_retry_count;
+    if(sta_retry_count < WIFI_MAXIMUM_BACKOFF_EXPONENT) {
+        sta_retry_count++;
+    }
+
+    ESP_LOGW(TAG, "STA disconnected; reconnecting in %lu ms", (unsigned long)delay_ms);
+    if(xTimerChangePeriod(sta_reconnect_timer, pdMS_TO_TICKS(delay_ms), 0) != pdPASS) {
+        ESP_LOGE(TAG, "failed to schedule STA reconnect");
+    }
+}
+
+static void sta_reconnect_timer_cb(TimerHandle_t timer) {
+    (void)timer;
+
+    esp_err_t err = esp_wifi_connect();
+    if(err != ESP_OK) {
+        ESP_LOGW(TAG, "STA reconnect failed: %s", esp_err_to_name(err));
+        sta_schedule_reconnect();
+    }
+}
+
 static void
     sta_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        sta_retry_count = 0;
+        xTimerStop(sta_reconnect_timer, 0);
         esp_wifi_connect();
     } else if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
+        sta_schedule_reconnect();
     } else if(event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)event_data;
+        sta_retry_count = 0;
+        xTimerStop(sta_reconnect_timer, 0);
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     }
 }
@@ -119,6 +151,18 @@ static bool network_connect_ap(mstring_t* ap_ssid, mstring_t* ap_pass) {
 
     ESP_LOGI(TAG, "init connect to AP");
     esp_netif_create_default_wifi_sta();
+
+    sta_reconnect_timer = xTimerCreateStatic(
+        "sta_reconnect",
+        pdMS_TO_TICKS(WIFI_RECONNECT_BASE_DELAY_MS),
+        pdFALSE,
+        NULL,
+        sta_reconnect_timer_cb,
+        &sta_reconnect_timer_buffer);
+    if(sta_reconnect_timer == NULL) {
+        ESP_LOGE(TAG, "failed to create STA reconnect timer");
+        return false;
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));

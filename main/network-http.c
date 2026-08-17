@@ -628,9 +628,20 @@ static esp_err_t wifi_list_get_handler(httpd_req_t* req) {
     uint16_t ap_count = 0;
     memset(ap_info, 0, sizeof(wifi_ap_record_t));
 
-    esp_wifi_scan_start(NULL, true);
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
+    esp_err_t scan_result = esp_wifi_scan_start(NULL, true);
+    if(scan_result != ESP_OK) {
+        ESP_LOGW(TAG, "wifi scan failed: %s", esp_err_to_name(scan_result));
+        free(ap_info);
+        httpd_resp_send_err(
+            req, HTTPD_500_INTERNAL_SERVER_ERROR, JSON_ERROR("wifi scan failed"));
+        return ESP_FAIL;
+    }
+
+    /* esp_wifi_scan_get_ap_records() frees the driver's internal scan list
+     * once it copies the records out, so the count must be read first -
+     * otherwise esp_wifi_scan_get_ap_num() always reports 0. */
     ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
 
     cJSON* root = cJSON_CreateObject();
     cJSON* array = cJSON_AddArrayToObject(root, "net_list");
