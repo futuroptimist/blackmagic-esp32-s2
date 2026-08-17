@@ -194,7 +194,10 @@ void cli_factory_reset(Cli* cli, mstring_t* args) {
     cli_write_eol(cli);
     cli_flush(cli);
     nvs_erase();
-    cli_write_str(cli, "OK");
+    cli_write_str(cli, "OK, rebooting");
+    cli_write_eol(cli);
+    cli_flush(cli);
+    esp_restart();
 }
 
 void cli_ping(Cli* cli, mstring_t* args) {

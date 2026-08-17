@@ -885,6 +885,15 @@ single-key, single-command SSH prototype. No production deployment.
   reboots on real hardware is a manual step (see this document's §9).
 - Key revocation, replacement, and factory-reset behavior (factory reset
   must rotate the host key and clear authorized keys, per `ssh-access.md`).
+  **Partially done.** Both `main/factory-reset-service.c`'s button-hold
+  path and `main/cli/cli-commands.c`'s `factory_reset` command now erase
+  NVS and reboot, which durably rotates the host key (a fresh one is
+  generated since none is found in NVS after erase). The authorized key is
+  **not** durably revoked by this alone: `ssh_keystore_load_or_seed_authorized_key()`
+  reseeds NVS from the build-embedded key on the next boot if none is
+  found, per this spike's own Phase 1 scoping decision to defer real
+  enrollment to Phase 2. Real, durable authorized-key revocation requires
+  Phase 2's enrollment mechanism.
 
 ### Phase 2 — Trusted provisioning and management CLI
 

@@ -57,9 +57,9 @@ static const char* TAG = "wolfssh_spike";
 /* Build-time embedded key material -- see CMakeLists.txt
  * target_add_binary_data() calls. Never logged; never copied to a mutable
  * buffer beyond what wolfSSH itself requires internally. The host key is
- * generated on-device and NVS-persisted instead (see ssh_keystore.h); the
- * authorized-key blob is still build-embedded directly for now (NVS
- * storage for it lands separately). */
+ * generated on-device and NVS-persisted instead (see ssh_keystore.h); only
+ * the authorized-key blob is still build-embedded, as the first-boot NVS
+ * seed (real enrollment is Phase 2). */
 extern const uint8_t embedded_authorized_key_blob_start[] asm(
     "_binary_embedded_authorized_key_blob_start");
 extern const uint8_t embedded_authorized_key_blob_end[] asm(
@@ -68,6 +68,12 @@ extern const uint8_t embedded_authorized_key_blob_end[] asm(
 static WOLFSSH_CTX* g_ctx = NULL;
 static volatile bool g_session_active = false;
 static uint32_t (*g_get_station_ip)(void) = NULL;
+/* Populated once in wolfssh_spike_start() from ssh_keystore.h's NVS-backed
+ * store (seeded from embedded_authorized_key_blob_start/end on first
+ * boot) -- see user_auth_cb()'s policy_key_matches() calls below, which
+ * compare against this, not the build-embedded blob directly. */
+static uint8_t g_authorized_key[SSH_KEYSTORE_AUTH_KEY_BLOB_MAX];
+static size_t g_authorized_key_len = 0;
 /* Hands one accepted client socket at a time from the listener task to the
  * persistent session-worker task -- see connection_task() below for why
  * this replaced spawning a new task per connection. */
@@ -167,9 +173,7 @@ static int user_auth_cb(byte authType, WS_UserAuthData* authData, void* ctx)
          * will not accept regardless. */
         if (!policy_key_matches(authData->sf.publicKey.publicKey,
                                  authData->sf.publicKey.publicKeySz,
-                                 embedded_authorized_key_blob_start,
-                                 (size_t)(embedded_authorized_key_blob_end -
-                                          embedded_authorized_key_blob_start))) {
+                                 g_authorized_key, g_authorized_key_len)) {
             return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
         }
         return WOLFSSH_USERAUTH_SUCCESS;
@@ -187,9 +191,7 @@ static int user_auth_cb(byte authType, WS_UserAuthData* authData, void* ctx)
 
     if (!policy_key_matches(authData->sf.publicKey.publicKey,
                              authData->sf.publicKey.publicKeySz,
-                             embedded_authorized_key_blob_start,
-                             (size_t)(embedded_authorized_key_blob_end -
-                                      embedded_authorized_key_blob_start))) {
+                             g_authorized_key, g_authorized_key_len)) {
         return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
     }
     return WOLFSSH_USERAUTH_SUCCESS;
@@ -555,6 +557,23 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
         } else {
             ESP_LOGW(TAG, "failed to compute host key fingerprint");
         }
+    }
+
+    /* Loads the persisted authorized key from NVS, seeding NVS from the
+     * build-embedded key on first boot (or just after a factory reset) --
+     * see ssh_keystore.h. Real enrollment is Phase 2; this is the
+     * interim, build-time-seeded key. Fails closed on stored corruption,
+     * same as the host key above. */
+    if (ssh_keystore_load_or_seed_authorized_key(
+            embedded_authorized_key_blob_start,
+            (size_t)(embedded_authorized_key_blob_end -
+                     embedded_authorized_key_blob_start),
+            g_authorized_key, sizeof(g_authorized_key), &g_authorized_key_len) !=
+        ESP_OK) {
+        ESP_LOGE(TAG, "authorized key unavailable; refusing to start SSH");
+        wolfSSH_CTX_free(g_ctx);
+        g_ctx = NULL;
+        return;
     }
 
     /* Restrict algorithm lists explicitly rather than accepting every
