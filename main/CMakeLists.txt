@@ -3,6 +3,7 @@ set(SOURCES
     "usb.c"
     "usb-uart.c"
     "nvs.c"
+    "nvs_recovery_policy.c"
     "nvs-config.c"
     "led.c"
     "cli-uart.c"

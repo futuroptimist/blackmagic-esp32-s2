@@ -60,18 +60,26 @@ back to the tracked root `sdkconfig`.
 
 ## Native (non-ESP-IDF) tests
 
-Some pure, dependency-free C logic (currently: SSH-spike policy functions in
-`components/wolfssh_spike/policy.c`) is tested by compiling and running with
+Some pure, dependency-free C logic is tested by compiling and running with
 the host compiler, no ESP-IDF toolchain required:
 
-```shell
-scripts/run_policy_tests.sh
-```
+- SSH-spike policy functions in `components/wolfssh_spike/policy.c`:
+  ```shell
+  scripts/run_policy_tests.sh
+  ```
+- SSH-spike NVS key-storage blob codec in
+  `components/wolfssh_spike/ssh_keystore_codec.c`:
+  ```shell
+  scripts/run_ssh_keystore_codec_tests.sh
+  ```
+- NVS initialization recovery policy in `main/nvs_recovery_policy.c`:
+  ```shell
+  scripts/run_nvs_recovery_policy_tests.sh
+  ```
 
-This is the only test suite in the repository as of this writing — there is
-no ESP-IDF-hosted unit test framework (no Unity/cmocka) here. If you add more
-pure logic worth testing this way, prefer extending this pattern over pulling
-in a new framework.
+There is no ESP-IDF-hosted unit test framework (no Unity/cmocka) here. If you
+add more pure logic worth testing this way, prefer extending this pattern
+over pulling in a new framework.
 
 ## Component conventions
 

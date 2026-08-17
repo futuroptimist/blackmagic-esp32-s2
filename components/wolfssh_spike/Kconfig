@@ -14,11 +14,14 @@ menu "wolfSSH feasibility spike"
             When disabled (the default), wolfSSL/wolfSSH are not compiled or
             linked, and no key files are required to build.
 
-            When enabled, the build requires two environment variables
-            pointing at externally-supplied key files:
-              WOLFSSH_SPIKE_HOST_KEY_PATH        (ECDSA P-256 host private key)
-              WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH  (ECDSA P-256 authorized public key)
-            See scripts/gen_ssh_spike_keys.sh to generate disposable
-            developer keys outside the repository.
+            When enabled, the build requires one environment variable
+            pointing at an externally-supplied key file:
+              WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH  the single authorized
+                ECDSA P-256 user key, as a raw SSH wire-format
+                public-key blob -- NOT a .pub text file or PEM.
+            See scripts/gen_ssh_spike_keys.sh to generate a disposable
+            developer key outside the repository. The host key is
+            generated on-device on first boot and persisted in NVS -- no
+            build-time host key input.
 
 endmenu

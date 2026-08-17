@@ -33,11 +33,13 @@
  * main/network-http.c, which uses heap_caps_get_info() the same way. */
 
 #include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/coding.h>
 #include <wolfssh/ssh.h>
 #include <wolfssh/error.h>
 
 #include "policy.h"
 #include "allocator.h"
+#include "ssh_keystore.h"
 
 static const char* TAG = "wolfssh_spike";
 
@@ -54,11 +56,10 @@ static const char* TAG = "wolfssh_spike";
 
 /* Build-time embedded key material -- see CMakeLists.txt
  * target_add_binary_data() calls. Never logged; never copied to a mutable
- * buffer beyond what wolfSSH itself requires internally. */
-extern const uint8_t embedded_host_key_pem_start[] asm(
-    "_binary_embedded_host_key_pem_start");
-extern const uint8_t embedded_host_key_pem_end[] asm(
-    "_binary_embedded_host_key_pem_end");
+ * buffer beyond what wolfSSH itself requires internally. The host key is
+ * generated on-device and NVS-persisted instead (see ssh_keystore.h); the
+ * authorized-key blob is still build-embedded directly for now (NVS
+ * storage for it lands separately). */
 extern const uint8_t embedded_authorized_key_blob_start[] asm(
     "_binary_embedded_authorized_key_blob_start");
 extern const uint8_t embedded_authorized_key_blob_end[] asm(
@@ -471,8 +472,8 @@ static void wolfssh_spike_task(void* arg)
 
 void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
 {
-    size_t host_key_len = (size_t)(embedded_host_key_pem_end -
-                                    embedded_host_key_pem_start);
+    static uint8_t host_key_der[SSH_KEYSTORE_HOST_KEY_DER_MAX];
+    size_t host_key_len = 0;
 
     if (get_station_ip == NULL) {
         ESP_LOGE(TAG, "station IP callback must not be NULL");
@@ -493,26 +494,67 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
         return;
     }
 
-    /* The embedded bytes are raw SEC1 EC PRIVATE KEY DER, not PEM --
-     * gen_ssh_spike_keys.sh generates DER directly, and this loads it as
-     * WOLFSSH_FORMAT_ASN1. The pinned wolfSSH's WOLFSSH_FORMAT_PEM path
-     * for private keys (wolfSSH_ProcessBuffer(), src/internal.c) is
-     * compiled only under #ifdef WOLFSSH_CERTS, which this spike does not
-     * define (no X.509 certificate support -- see user_settings.h);
-     * passing PEM bytes there falls through to WS_UNIMPLEMENTED_E instead
-     * of being parsed (confirmed on real hardware). The
-     * `_pem_start`/`_pem_end` symbol names below are unrelated to this
-     * file's actual encoding: CMakeLists.txt always copies whatever
-     * WOLFSSH_SPIKE_HOST_KEY_PATH points at into a fixed internal
-     * `embedded_host_key.pem` filename so the generated symbol names stay
-     * predictable regardless of the operator-supplied source filename. */
-    if (wolfSSH_CTX_UsePrivateKey_buffer(g_ctx, embedded_host_key_pem_start,
-                                          (word32)host_key_len,
-                                          WOLFSSH_FORMAT_ASN1) != WS_SUCCESS) {
-        ESP_LOGE(TAG, "failed to load embedded host key");
+    /* Loads the persisted host key from NVS, generating and persisting a
+     * fresh one on first boot (or just after a factory reset) -- see
+     * ssh_keystore.h. Fails closed (does not start SSH) if stored key
+     * material exists but fails integrity validation; never regenerates
+     * in that case. */
+    if (ssh_keystore_load_or_generate_host_key(
+            host_key_der, sizeof(host_key_der), &host_key_len) != ESP_OK) {
+        ESP_LOGE(TAG, "host key unavailable; refusing to start SSH");
         wolfSSH_CTX_free(g_ctx);
         g_ctx = NULL;
         return;
+    }
+
+    /* Raw SEC1 "EC PRIVATE KEY" DER, not PEM -- both
+     * ssh_keystore_load_or_generate_host_key() and the pinned wolfSSH's
+     * WOLFSSH_FORMAT_PEM path for private keys (compiled only under
+     * #ifdef WOLFSSH_CERTS, which this spike does not define -- no X.509
+     * certificate support, see user_settings.h) agree on
+     * WOLFSSH_FORMAT_ASN1. */
+    if (wolfSSH_CTX_UsePrivateKey_buffer(g_ctx, host_key_der,
+                                          (word32)host_key_len,
+                                          WOLFSSH_FORMAT_ASN1) != WS_SUCCESS) {
+        ESP_LOGE(TAG, "failed to load host key");
+        wolfSSH_CTX_free(g_ctx);
+        g_ctx = NULL;
+        return;
+    }
+
+    {
+        /* Logged once per boot so "stable fingerprint across ordinary
+         * reboots" is concretely verifiable by diffing this line across
+         * reboots. Never logs the private key itself. Must only ever be
+         * derived from the key just loaded above -- this must never
+         * trigger key generation itself, or fingerprint stability would
+         * silently regress.
+         *
+         * Formatted as OpenSSH's "SHA256:<base64, no padding>" rather than
+         * raw hex, so this line can be pasted directly as
+         * run_ssh_spike_hardware_validation.sh's --host-key-fingerprint
+         * argument -- that script always compares against
+         * `ssh-keygen -lf` output on the *live* scanned key, which is
+         * always in this format; see docs/design/ssh-feasibility-spike.md
+         * section 8's hardware-validation prerequisites. */
+        uint8_t fingerprint[SSH_KEYSTORE_FINGERPRINT_LEN];
+        if (ssh_keystore_host_key_fingerprint_sha256(
+                host_key_der, host_key_len, fingerprint) == ESP_OK) {
+            char b64[((SSH_KEYSTORE_FINGERPRINT_LEN + 2) / 3) * 4 + 1];
+            word32 b64_len = sizeof(b64);
+            if (Base64_Encode_NoNl(fingerprint, SSH_KEYSTORE_FINGERPRINT_LEN,
+                                    (byte*)b64, &b64_len) == 0) {
+                while (b64_len > 0 && b64[b64_len - 1] == '=') {
+                    b64_len--;
+                }
+                b64[b64_len] = '\0';
+                ESP_LOGI(TAG, "host key fingerprint: SHA256:%s", b64);
+            } else {
+                ESP_LOGW(TAG, "failed to base64-encode host key fingerprint");
+            }
+        } else {
+            ESP_LOGW(TAG, "failed to compute host key fingerprint");
+        }
     }
 
     /* Restrict algorithm lists explicitly rather than accepting every
