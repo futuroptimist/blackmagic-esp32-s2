@@ -859,7 +859,8 @@ single-key, single-command SSH prototype. No production deployment.
   (`wc_GenerateSeed()` → `esp_random()`).
 - Persistent host key and authorized-key storage in NVS, following the
   existing `main/nvs.c`/`main/nvs-config.c` string-key pattern but with a
-  **versioned schema**, atomic updates, validation, and recovery on corruption.
+  **versioned blob schema**, atomic single-blob NVS updates, envelope and
+  integrity validation, and fail-closed recovery on corruption.
   **Done** for both: `user_auth_cb()` compares presented keys against the
   NVS-loaded authorized key (seeded from the build-embedded blob on first
   boot), not the build-embedded blob directly. One deliberate deviation
