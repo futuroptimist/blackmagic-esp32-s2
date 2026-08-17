@@ -862,11 +862,12 @@ single-key, single-command SSH prototype. No production deployment.
   (`wc_GenerateSeed()` → `esp_random()`).
 - Persistent host key and authorized-key storage in NVS, following the
   existing `main/nvs.c`/`main/nvs-config.c` string-key pattern but with a
-  **versioned schema**, atomic updates, validation, and recovery on corruption.
-  **Host-key storage done; authorized-key storage schema exists but is not
-  yet wired into authentication** — `user_auth_cb()` still compares
-  against the build-embedded blob directly here (see a follow-up PR for
-  that wiring). One deliberate deviation from the stated pattern:
+  **versioned blob schema**, atomic single-blob NVS updates, envelope and
+  integrity validation, and fail-closed recovery on corruption.
+  **Done** for both: `user_auth_cb()` compares presented keys against the
+  NVS-loaded authorized key (seeded from the build-embedded blob on first
+  boot), not the build-embedded blob directly. One deliberate deviation
+  from the stated pattern:
   `ssh_keystore.c`/`ssh_keystore_codec.c` implement their own NVS access
   and versioned blob schema (`SSH_KEYSTORE_SCHEMA_VERSION`,
   `ssh_keystore_validate_*_blob()`) rather than extending
@@ -877,17 +878,26 @@ single-key, single-command SSH prototype. No production deployment.
   The new code reuses the *same shape* (open → get/set → commit → close;
   typed wrapper functions) against the same `nvs_storage` partition, just
   from within `components/wolfssh_spike/` instead. The codec validates the
-  schema/type/length/CRC envelope; wolfCrypt's DER decode (and, once the
-  authorized-key API is wired, wolfSSH's key handling) performs final semantic
-  parsing. Corrupt blobs and unexpected partition-initialization recovery fail
-  closed: SSH does not start and only the physical or local trusted factory
-  reset may erase the partition and authorize identity rotation.
+  schema/type/length/CRC envelope; wolfCrypt's DER decode and wolfSSH's
+  authorized-key handling perform the final semantic parsing. Corrupt blobs
+  and unexpected partition-initialization recovery both fail closed: SSH
+  does not start, and only the physical or local trusted factory reset may
+  erase the partition and authorize identity rotation.
 - Stable host fingerprint across ordinary reboots. **Done**:
   `ssh_keystore_host_key_fingerprint_sha256()`, logged once per boot in
   `wolfssh_spike_start()`. Verification that it's actually stable across
   reboots on real hardware is a manual step (see this document's §9).
 - Key revocation, replacement, and factory-reset behavior (factory reset
   must rotate the host key and clear authorized keys, per `ssh-access.md`).
+  **Partially done.** Both `main/factory-reset-service.c`'s button-hold
+  path and `main/cli/cli-commands.c`'s `factory_reset` command now erase
+  NVS and reboot, which durably rotates the host key (a fresh one is
+  generated since none is found in NVS after erase). The authorized key is
+  **not** durably revoked by this alone: `ssh_keystore_load_or_seed_authorized_key()`
+  reseeds NVS from the build-embedded key on the next boot if none is
+  found, per this spike's own Phase 1 scoping decision to defer real
+  enrollment to Phase 2. Real, durable authorized-key revocation requires
+  Phase 2's enrollment mechanism.
 
 ### Phase 2 — Trusted provisioning and management CLI
 
