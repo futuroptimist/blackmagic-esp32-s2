@@ -2,8 +2,8 @@
 
 ## Context
 
-This firmware is pinned to ESP-IDF v4.4.8 (see `sdkconfig`, `.github/workflows/build.yml`,
-and `README.md`). Per Espressif's own advisory
+This firmware is pinned to ESP-IDF v4.4.8 (see `AGENTS.md`,
+`.github/workflows/build.yml`, and `README.md`). Per Espressif's own advisory
 ([AR2024-008](https://documentation.espressif.com/AR2024-008%20End-of-Life%20Advisory%20for%20ESP-IDF%20v4.4%20Release%20Branch%20EN.html)),
 **the v4.4 release branch reached End-of-Life in July 2024.** Espressif's
 published [support policy](https://github.com/espressif/esp-idf/blob/master/SUPPORT_POLICY.md)
@@ -14,10 +14,11 @@ July 2024** — this document was first written in August 2026, over two
 years after that date; compute the current gap from those two dates
 rather than from this document's own age.
 
-Adding SSH (`components/wolfssh_spike/`) is the first network-facing feature
-built on top of this stack beyond the existing Wi-Fi/HTTP surface, which is
-exactly the kind of change `docs/design/ssh-feasibility-spike.md`'s Phase 1
-roadmap flags as requiring either an ESP-IDF upgrade or a documented,
+The existing network-facing surface includes the HTTP server, raw GDB and raw
+UART TCP servers started by `main/main.c`, plus the discovery services started
+by `main/network.c`. Adding SSH (`components/wolfssh_spike/`) is the first new
+network-facing surface governed by `docs/design/ssh-feasibility-spike.md`'s
+Phase 1 roadmap, which requires either an ESP-IDF upgrade or a documented,
 time-bounded maintenance policy before shipping. Given a full v4.4 → v5.x
 migration is a large, separate, high-risk undertaking (toolchain changes and
 API breakage across every component: `main/network.c`, `main/network-http.c`,
@@ -36,6 +37,8 @@ experimental SSH-enabled build, and therefore relevant to CVE tracking:
 - `esp_http_server` (actively used by `main/network-http.c` for the
   device's web config UI and HTTP APIs)
 - `mdns` (actively used by `main/network.c` for hostname advertisement)
+- cJSON (HTTP handlers in `main/network-http.c` parse received request bodies
+  with `cJSON_Parse()`)
 - mbedTLS (used by NVS encryption support and other ESP-IDF internals)
 - NVS / `spi_flash` (persistent storage, including the SSH key material
   added in Phase 1)
