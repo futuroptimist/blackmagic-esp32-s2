@@ -859,12 +859,32 @@ single-key, single-command SSH prototype. No production deployment.
 - Upgrade ESP-IDF from EOL v4.4, or document a credible, time-bounded
   security-maintenance/backport policy for staying on it.
 - Per-device host-key generation on first boot (ESP-IDF hardware RNG),
-  replacing this spike's build-time-injected fixed host key.
+  replacing this spike's build-time-injected fixed host key. **Done**: see
+  `components/wolfssh_spike/ssh_keystore.c`
+  (`ssh_keystore_load_or_generate_host_key()`), using wolfCrypt's
+  `wc_ecc_make_key_ex()` seeded via the ESP-IDF hardware RNG
+  (`wc_GenerateSeed()` → `esp_random()`).
 - Persistent host key and authorized-key storage in NVS, following the
   existing `main/nvs.c`/`main/nvs-config.c` string-key pattern but with a
   **versioned schema** (this spike introduces no schema — production needs
-  one), atomic updates, validation, and recovery on corruption.
-- Stable host fingerprint across ordinary reboots.
+  one), atomic updates, validation, and recovery on corruption. **Done**,
+  with one deliberate deviation from the stated pattern:
+  `ssh_keystore.c`/`ssh_keystore_codec.c` implement their own NVS access
+  and versioned blob schema (`SSH_KEYSTORE_SCHEMA_VERSION`,
+  `ssh_keystore_validate_*_blob()`) rather than extending
+  `main/nvs.c`/`main/nvs-config.c` directly — `main` implicitly depends on
+  every component (see `main/CMakeLists.txt`) and already calls into
+  `wolfssh_spike_start()`, so `wolfssh_spike` calling back into `main`
+  would be a component dependency cycle ESP-IDF's build does not support.
+  The new code reuses the *same shape* (open → get/set → commit → close;
+  typed wrapper functions) against the same `nvs_storage` partition, just
+  from within `components/wolfssh_spike/` instead. Corruption handling
+  fails closed (refuses to start SSH, never silently regenerates), per
+  `ssh-access.md`'s stated requirement.
+- Stable host fingerprint across ordinary reboots. **Done**:
+  `ssh_keystore_host_key_fingerprint_sha256()`, logged once per boot in
+  `wolfssh_spike_start()`. Verification that it's actually stable across
+  reboots on real hardware is a manual step (see this document's §9).
 - Key revocation, replacement, and factory-reset behavior (factory reset
   must rotate the host key and clear authorized keys, per `ssh-access.md`).
 

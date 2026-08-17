@@ -28,17 +28,12 @@ endif()
 
 # --- Required, externally-supplied key material -----------------------
 #
-# Never read from a path inside the repository, and never fall back to a
-# bundled default key. See docs/design/ssh-feasibility-spike.md and
-# scripts/gen_ssh_spike_keys.sh.
-if(NOT DEFINED ENV{WOLFSSH_SPIKE_HOST_KEY_PATH} OR "$ENV{WOLFSSH_SPIKE_HOST_KEY_PATH}" STREQUAL "")
-    message(FATAL_ERROR
-        "CONFIG_EXPERIMENTAL_WOLFSSH_SERVER is enabled but the "
-        "WOLFSSH_SPIKE_HOST_KEY_PATH environment variable is not set. It "
-        "must point at a PEM-encoded ECDSA P-256 host private key generated "
-        "OUTSIDE this repository. Run scripts/gen_ssh_spike_keys.sh to "
-        "generate a disposable developer key.")
-endif()
+# The host key is generated on-device and NVS-persisted (see
+# ssh_keystore.c) -- no build-time host key input anymore. The single
+# authorized key is still supplied externally, as the first-boot NVS seed
+# (real enrollment is Phase 2). Never read from a path inside the
+# repository, and never fall back to a bundled default key. See
+# docs/design/ssh-feasibility-spike.md and scripts/gen_ssh_spike_keys.sh.
 if(NOT DEFINED ENV{WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH} OR "$ENV{WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH}" STREQUAL "")
     message(FATAL_ERROR
         "CONFIG_EXPERIMENTAL_WOLFSSH_SERVER is enabled but the "
@@ -48,23 +43,17 @@ if(NOT DEFINED ENV{WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH} OR "$ENV{WOLFSSH_SPIKE_AUT
         "Run scripts/gen_ssh_spike_keys.sh to generate one.")
 endif()
 
-set(WOLFSSH_SPIKE_HOST_KEY_PATH "$ENV{WOLFSSH_SPIKE_HOST_KEY_PATH}")
 set(WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH "$ENV{WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH}")
 
-if(NOT EXISTS "${WOLFSSH_SPIKE_HOST_KEY_PATH}")
-    message(FATAL_ERROR "WOLFSSH_SPIKE_HOST_KEY_PATH does not exist: ${WOLFSSH_SPIKE_HOST_KEY_PATH}")
-endif()
 if(NOT EXISTS "${WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH}")
     message(FATAL_ERROR "WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH does not exist: ${WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH}")
 endif()
 
-# Copy the externally-supplied keys into the build tree under fixed names,
-# so the embedded-binary symbol names below are predictable regardless of
+# Copy the externally-supplied key into the build tree under a fixed name,
+# so the embedded-binary symbol name below is predictable regardless of
 # the caller's original file name or directory. Nothing is copied into the
 # source tree -- CMAKE_CURRENT_BINARY_DIR is a build (not source) directory.
-set(EMBEDDED_HOST_KEY "${CMAKE_CURRENT_BINARY_DIR}/embedded_host_key.pem")
 set(EMBEDDED_AUTHORIZED_KEY "${CMAKE_CURRENT_BINARY_DIR}/embedded_authorized_key.blob")
-configure_file("${WOLFSSH_SPIKE_HOST_KEY_PATH}" "${EMBEDDED_HOST_KEY}" COPYONLY)
 configure_file("${WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH}" "${EMBEDDED_AUTHORIZED_KEY}" COPYONLY)
 
 # --- Source selection ---------------------------------------------------
@@ -95,12 +84,23 @@ list(REMOVE_ITEM WOLFSSH_SRCS
 
 idf_component_register(
     SRCS ${WOLFSSL_SRCS} ${WOLFSSH_SRCS} "wolfssh_spike.c" "policy.c" "allocator.c"
+         "ssh_keystore.c" "ssh_keystore_codec.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "${WOLFSSL_DIR}" "${WOLFSSH_DIR}" "user_settings" "freertos_shim"
-    PRIV_REQUIRES lwip
+    PRIV_REQUIRES lwip nvs_flash
 )
+
+# PRIV_REQUIRES above does add nvs_flash to this component's dependency
+# graph, but (observed on this ESP-IDF v4.4.8 checkout) does not reliably
+# propagate its own -- or its transitive spi_flash requirement's -- public
+# INCLUDE_DIRS to a component that conditionally idf_component_register()s
+# based on a Kconfig guard the way this one does. Linking against its
+# target directly is the same underlying mechanism PRIV_REQUIRES wraps,
+# and does propagate include dirs correctly (including nvs_flash's own
+# transitive REQUIRES spi_flash, which nvs_flash.h needs for
+# esp_partition.h).
+target_link_libraries(${COMPONENT_LIB} PRIVATE idf::nvs_flash)
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE WOLFSSL_USER_SETTINGS)
 
-target_add_binary_data(${COMPONENT_TARGET} "${EMBEDDED_HOST_KEY}" BINARY)
 target_add_binary_data(${COMPONENT_TARGET} "${EMBEDDED_AUTHORIZED_KEY}" BINARY)
