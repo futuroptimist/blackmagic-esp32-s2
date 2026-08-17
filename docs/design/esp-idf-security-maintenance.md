@@ -9,11 +9,13 @@ and `README.md`). Per Espressif's own advisory
 published [support policy](https://github.com/espressif/esp-idf/blob/master/SUPPORT_POLICY.md)
 states plainly: "It is our policy to not continue fixing bugs in End of Life
 releases" — including security fixes. That means this project has been
-running on a branch with **no upstream security support at all since mid-2024**,
-over two years before this document was written.
+running on a branch with **no upstream security support at all since
+July 2024** — this document was first written in August 2026, over two
+years after that date; compute the current gap from those two dates
+rather than from this document's own age.
 
 Adding SSH (`components/wolfssh_spike/`) is the first network-facing feature
-built on top of this stack beyond the existing WiFi/HTTP surface, which is
+built on top of this stack beyond the existing Wi-Fi/HTTP surface, which is
 exactly the kind of change `docs/design/ssh-feasibility-spike.md`'s Phase 1
 roadmap flags as requiring either an ESP-IDF upgrade or a documented,
 time-bounded maintenance policy before shipping. Given a full v4.4 → v5.x
@@ -31,6 +33,9 @@ experimental SSH-enabled build, and therefore relevant to CVE tracking:
 
 - Wi-Fi stack (`esp_wifi`, `wpa_supplicant`)
 - lwIP (TCP/IP stack)
+- `esp_http_server` (actively used by `main/network-http.c` for the
+  device's web config UI and HTTP APIs)
+- `mdns` (actively used by `main/network.c` for hostname advertisement)
 - mbedTLS (used by NVS encryption support and other ESP-IDF internals)
 - NVS / `spi_flash` (persistent storage, including the SSH key material
   added in Phase 1)
@@ -67,18 +72,31 @@ tree) are explicitly out of scope — tracking their CVEs would be noise.
 
 Because the v4.4 branch is fully EOL, **Espressif will not cut further
 v4.4.x point releases** — there is no upstream patch to simply pull in.
-Concretely, "backport" here means:
+A fix cannot live only as a hand-edit to a local or CI-container ESP-IDF
+checkout (per `AGENTS.md`, this project builds against ESP-IDF either from
+a local install at whatever path the developer chose, or from the
+`espressif/idf:v4.4.8` Docker image — both are ephemeral/developer-specific
+and neither is version-controlled, so an edit made only there disappears
+the moment that checkout or container is recreated, and every other build
+silently reverts to stock, unpatched v4.4.8). Concretely, "backport" here
+means:
 
 1. Locate the fix in a newer ESP-IDF branch (typically v5.x, where
    Espressif does patch actively-supported branches).
-2. Hand-port the specific diff into this project's pinned ESP-IDF checkout
-   (`~/esp/esp-idf-v4.4.8` locally / `espressif/idf:v4.4.8` in CI) or, if the
-   affected code lives in a component this project already vendors as a
-   submodule pattern, apply it there.
-3. Document provenance explicitly: the upstream commit hash, the ESP-IDF
-   version it landed in, and why it's believed to apply cleanly to v4.4.8 —
-   the same discipline already used for the pinned `wolfssl`/`wolfssh`
-   submodules in `components/wolfssh_spike/`.
+2. Save it as a diff under a repository-tracked `patches/esp-idf/`
+   directory (does not exist yet — create it when the first backport is
+   needed), named after the CVE or advisory ID and the affected file(s).
+3. Apply it as an explicit, documented build step run against whichever
+   ESP-IDF checkout is in use (local install or the Docker image) *before*
+   `idf.py build`, wired into both the local build instructions
+   (`AGENTS.md`'s `Build` section) and `.github/workflows/build.yml`'s CI
+   jobs, so a patch applies identically and automatically everywhere,
+   rather than depending on someone remembering to hand-edit each
+   environment.
+4. Document provenance explicitly in the patch file's header: the upstream
+   commit hash, the ESP-IDF version it landed in, and why it's believed to
+   apply cleanly to v4.4.8 — the same discipline already used for the
+   pinned `wolfssl`/`wolfssh` submodules in `components/wolfssh_spike/`.
 
 This is inherently a heavier, rarer operation than pulling a point release,
 since it requires understanding and validating the patch ourselves without
@@ -93,11 +111,16 @@ backport):
   in-scope component that cannot be confidently and quickly hand-patched
   (e.g. a deep fix in the Wi-Fi stack's closed-source binary blobs, which
   cannot be patched at all without an Espressif-provided rebuild).
-- **(b) Sustained EOL exposure.** Since there is no future EOL date to
-  anchor to — that already happened in July 2024 — treat time itself as a
-  signal: review upgrade feasibility at least every 12 months regardless of
-  whether a specific CVE has been found, and escalate visibly the longer
-  the project remains on an unsupported branch.
+- **(b) Sustained EOL exposure, on a firm deadline.** Since there is no
+  future EOL date to anchor to — that already happened in July 2024 — this
+  trigger is itself time-bounded rather than open-ended: a mandatory
+  ESP-IDF-upgrade project must be **opened by January 2027** (chosen as a
+  concrete, near-term deadline from this policy's original authorship in
+  August 2026, not an indefinitely deferrable "eventually"), and, once
+  opened under any trigger in this list, must **complete within 6 months**
+  of being opened. Independent of that deadline, review upgrade
+  feasibility at least every 12 months and escalate visibly the longer the
+  project remains on an unsupported branch.
 - **(c) New network-facing surface on a known-unpatched component.** Any
   new network-facing feature (SSH is the first; anything after it) landing
   on top of a component with a known, unpatched CVE is an immediate
