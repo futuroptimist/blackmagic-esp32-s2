@@ -125,7 +125,8 @@ jobs:
               "${{ secrets.INDEXER_URL }}"/blackmagic-firmware/uploadfiles
 
   # Native (host-compiled, no ESP-IDF) tests for the wolfSSH-spike's pure
-  # policy functions. See AGENTS.md and docs/design/ssh-feasibility-spike.md.
+  # policy functions, NVS recovery policy, and keystore codec. See AGENTS.md
+  # and docs/design/ssh-feasibility-spike.md.
   wolfssh-spike-policy-tests:
     runs-on: ubuntu-latest
     steps:
@@ -137,6 +138,12 @@ jobs:
 
       - name: 'Run policy unit tests'
         run: scripts/run_policy_tests.sh
+
+      - name: 'Run NVS recovery policy unit tests'
+        run: scripts/run_nvs_recovery_policy_tests.sh
+
+      - name: 'Run SSH keystore codec unit tests'
+        run: scripts/run_ssh_keystore_codec_tests.sh
 
       - name: 'Run hardware-validation-runner regression tests'
         run: scripts/test_ssh_spike_hardware_validation.sh
@@ -189,7 +196,6 @@ jobs:
             -v "$PWD:/project" \
             -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
             -w /project \
-            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.der \
             -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
             espressif/idf:v4.4.8 \
             bash -c "idf.py -B build-ssh-spike -D SDKCONFIG_DEFAULTS='sdkconfig;sdkconfig.ci-ssh-spike' -D SDKCONFIG=build-ssh-spike/sdkconfig build"
@@ -200,7 +206,6 @@ jobs:
             -v "$PWD:/project" \
             -v "$RUNNER_TEMP/wolfssh-spike-keys:/ssh-keys:ro" \
             -w /project \
-            -e WOLFSSH_SPIKE_HOST_KEY_PATH=/ssh-keys/embedded_host_key.der \
             -e WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH=/ssh-keys/authorized_key.blob \
             espressif/idf:v4.4.8 \
             bash -c "idf.py -B build-ssh-spike size && idf.py -B build-ssh-spike size-components"

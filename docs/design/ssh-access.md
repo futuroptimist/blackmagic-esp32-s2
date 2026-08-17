@@ -130,6 +130,11 @@ Persist updates atomically where NVS permits. On corrupt, incomplete, or
 inconsistent SSH state, fail closed: do not start SSH, retain recovery through
 the trusted local enrollment path, and do not silently generate a new identity
 unless the documented recovery/reset operation requests rotation.
+Unexpected `nvs_storage` initialization recovery is part of this boundary:
+when experimental SSH is enabled, the firmware preserves the partition and
+does not start SSH until the physical reset flow or local `factory_reset`
+command explicitly erases it. First boot and those explicit resets remain the
+only key-absence cases that authorize host-key generation.
 
 ## Remote command authorization
 

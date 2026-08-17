@@ -145,10 +145,16 @@
  * no internal threading inside wolfSSL/wolfSSH. */
 #define SINGLE_THREADED
 
-/* No filesystem -- host key and authorized key are both build-time
- * embedded binary buffers (see CMakeLists.txt EMBED_FILES-equivalent
- * target_add_binary_data calls), loaded via *_buffer() APIs only. */
+/* No filesystem -- the authorized key is a build-time embedded binary
+ * buffer (see CMakeLists.txt target_add_binary_data call), loaded via
+ * *_buffer() APIs only. The host key is generated on-device and loaded
+ * from NVS instead (see ssh_keystore.c) -- also not filesystem I/O. */
 #define NO_FILESYSTEM
+
+/* Needed for Base64_Encode_NoNl(), used only to format the boot-time host
+ * key fingerprint log line as OpenSSH's "SHA256:<base64>" -- see
+ * wolfssh_spike_start()'s fingerprint block. */
+#define WOLFSSL_BASE64_ENCODE
 
 /* No TLS session cache -- this spike does not use TLS at all. */
 #define NO_SESSION_CACHE
