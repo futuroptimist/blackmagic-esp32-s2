@@ -636,29 +636,22 @@ about the current one.
 **Prerequisites** (all manual, not automated by the script):
 1. A Flipper Zero Wi-Fi Board reachable over the operator's local network,
    with its IP address or `.local` hostname known.
-2. `scripts/gen_ssh_spike_keys.sh` run to produce a host key and an
-   authorized developer key pair, and the experimental firmware built and
-   flashed with `WOLFSSH_SPIKE_HOST_KEY_PATH`/
-   `WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH` pointed at them (see AGENTS.md and
-   [§6](#6-prototype-architecture)).
-3. The expected host-key fingerprint, computed once locally right after key
-   generation. `$WOLFSSH_SPIKE_HOST_KEY_PATH` is a raw SEC1 EC **private**
-   key in DER form (see prerequisite 2), which `ssh-keygen -lf` cannot read
-   directly — it needs an OpenSSH-format **public** key. Derive one and
-   fingerprint it in one pipeline; this reads and derives public-key
-   material only and never prints the private key itself:
-   ```console
-   openssl pkey -inform DER -in "$WOLFSSH_SPIKE_HOST_KEY_PATH" -pubout 2>/dev/null \
-       | ssh-keygen -i -m PKCS8 -f /dev/stdin \
-       | ssh-keygen -lf /dev/stdin
-   ```
-   The second field of that output (the `SHA256:...` token) is the value
-   to pass to `--host-key-fingerprint` below. (Alternatively, read the
-   fingerprint back from the device's own serial log at boot, if the
-   firmware ever logs it — check before assuming.) This value is what
-   `--host-key-fingerprint` pins against; the script refuses to proceed at
-   all if the board's actual host key doesn't match it, rather than
-   trust-on-first-use blindly accepting whatever key the board presents.
+2. `scripts/gen_ssh_spike_keys.sh` run to produce an authorized developer
+   key pair, and the experimental firmware built and flashed with
+   `WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH` pointed at it (see AGENTS.md and
+   [§6](#6-prototype-architecture)). The host key is generated on-device on
+   first boot (Phase 1; see the roadmap below) — there is no host-key file
+   to point a build variable at.
+3. The expected host-key fingerprint. Capture the device's own serial log
+   at boot (`idf.py monitor`, or any equivalent capture) and copy the
+   `host key fingerprint: SHA256:...` line's value —
+   `ssh_keystore_host_key_fingerprint_sha256()` in
+   `components/wolfssh_spike/ssh_keystore.c` formats this identically to
+   `ssh-keygen -lf`'s output, so no manual conversion is needed. This value
+   is what `--host-key-fingerprint` pins against; the script refuses to
+   proceed at all if the board's actual host key doesn't match it, rather
+   than trust-on-first-use blindly accepting whatever key the board
+   presents.
 4. Optionally, a serial monitor capture (`idf.py monitor` output redirected
    to a file, or any equivalent capture) taken while the script's
    experimental-mode phases run, to pass as `--monitor-log` afterward.
@@ -867,8 +860,11 @@ single-key, single-command SSH prototype. No production deployment.
 - Persistent host key and authorized-key storage in NVS, following the
   existing `main/nvs.c`/`main/nvs-config.c` string-key pattern but with a
   **versioned schema** (this spike introduces no schema — production needs
-  one), atomic updates, validation, and recovery on corruption. **Done**,
-  with one deliberate deviation from the stated pattern:
+  one), atomic updates, validation, and recovery on corruption.
+  **Host-key storage done; authorized-key storage schema exists but is not
+  yet wired into authentication** — `user_auth_cb()` still compares
+  against the build-embedded blob directly here (see a follow-up PR for
+  that wiring). One deliberate deviation from the stated pattern:
   `ssh_keystore.c`/`ssh_keystore_codec.c` implement their own NVS access
   and versioned blob schema (`SSH_KEYSTORE_SCHEMA_VERSION`,
   `ssh_keystore_validate_*_blob()`) rather than extending

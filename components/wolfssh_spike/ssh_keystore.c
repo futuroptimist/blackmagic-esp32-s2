@@ -113,9 +113,17 @@ esp_err_t ssh_keystore_load_or_generate_host_key(
 
     err = nvs_get_blob(handle, SSH_KEYSTORE_NVS_KEY_HOST, &blob, &blob_len);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        /* No stored key: this is the documented first-boot (or
-         * just-after-factory-reset) case, not corruption -- generate and
-         * persist a fresh identity. */
+        /* No stored key: the documented first-boot / just-after-factory-
+         * reset case, not corruption at this layer -- generate and persist
+         * a fresh identity. Note this can also be reached if main/nvs.c's
+         * nvs_init() itself just erased the whole "nvs_storage" partition
+         * (ESP_ERR_NVS_NO_FREE_PAGES / ESP_ERR_NVS_NEW_VERSION_FOUND at
+         * that lower layer, handled before this code ever runs) -- an
+         * unreadable partition can't have its prior identity "preserved,"
+         * so generating fresh here is the correct recovery for that case
+         * too, not a violation of the fail-closed policy above (which is
+         * about a validation failure on an otherwise-*readable* stored
+         * blob, a different failure mode entirely). */
         size_t der_len = 0;
 
         if (generate_host_key_der(der_out, der_out_cap, &der_len) != ESP_OK) {

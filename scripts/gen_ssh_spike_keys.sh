@@ -3,8 +3,8 @@
 # feasibility spike (CONFIG_EXPERIMENTAL_WOLFSSH_SERVER).
 #
 # Writes to a caller-supplied directory, or a fresh mktemp directory if none
-# is given. Never writes inside this repository -- this is the externally
-# -supplied input CMakeLists.txt requires (WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH);
+# is given. Never writes inside this repository -- this is the externally-
+# supplied input CMakeLists.txt requires (WOLFSSH_SPIKE_AUTHORIZED_KEY_PATH);
 # nothing it produces should ever be committed. The host key is generated
 # on-device on first boot and NVS-persisted (see ssh_keystore.c) -- this
 # script no longer generates one.

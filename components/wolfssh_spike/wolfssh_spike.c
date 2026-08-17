@@ -33,6 +33,7 @@
  * main/network-http.c, which uses heap_caps_get_info() the same way. */
 
 #include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/coding.h>
 #include <wolfssh/ssh.h>
 #include <wolfssh/error.h>
 
@@ -527,19 +528,30 @@ void wolfssh_spike_start(uint32_t (*get_station_ip)(void))
          * reboots. Never logs the private key itself. Must only ever be
          * derived from the key just loaded above -- this must never
          * trigger key generation itself, or fingerprint stability would
-         * silently regress. */
+         * silently regress.
+         *
+         * Formatted as OpenSSH's "SHA256:<base64, no padding>" rather than
+         * raw hex, so this line can be pasted directly as
+         * run_ssh_spike_hardware_validation.sh's --host-key-fingerprint
+         * argument -- that script always compares against
+         * `ssh-keygen -lf` output on the *live* scanned key, which is
+         * always in this format; see docs/design/ssh-feasibility-spike.md
+         * section 8's hardware-validation prerequisites. */
         uint8_t fingerprint[SSH_KEYSTORE_FINGERPRINT_LEN];
         if (ssh_keystore_host_key_fingerprint_sha256(
                 host_key_der, host_key_len, fingerprint) == ESP_OK) {
-            char hex[SSH_KEYSTORE_FINGERPRINT_LEN * 2 + 1];
-            size_t i;
-            for (i = 0; i < SSH_KEYSTORE_FINGERPRINT_LEN; i++) {
-                static const char digits[] = "0123456789abcdef";
-                hex[i * 2] = digits[fingerprint[i] >> 4];
-                hex[i * 2 + 1] = digits[fingerprint[i] & 0x0F];
+            char b64[((SSH_KEYSTORE_FINGERPRINT_LEN + 2) / 3) * 4 + 1];
+            word32 b64_len = sizeof(b64);
+            if (Base64_Encode_NoNl(fingerprint, SSH_KEYSTORE_FINGERPRINT_LEN,
+                                    (byte*)b64, &b64_len) == 0) {
+                while (b64_len > 0 && b64[b64_len - 1] == '=') {
+                    b64_len--;
+                }
+                b64[b64_len] = '\0';
+                ESP_LOGI(TAG, "host key fingerprint: SHA256:%s", b64);
+            } else {
+                ESP_LOGW(TAG, "failed to base64-encode host key fingerprint");
             }
-            hex[sizeof(hex) - 1] = '\0';
-            ESP_LOGI(TAG, "host key fingerprint (sha256): %s", hex);
         } else {
             ESP_LOGW(TAG, "failed to compute host key fingerprint");
         }
