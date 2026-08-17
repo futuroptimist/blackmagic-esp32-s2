@@ -857,7 +857,10 @@ single-key, single-command SSH prototype. No production deployment.
 ### Phase 1 — Supported platform and cryptographic foundation
 
 - Upgrade ESP-IDF from EOL v4.4, or document a credible, time-bounded
-  security-maintenance/backport policy for staying on it.
+  security-maintenance/backport policy for staying on it. **Done**: see
+  `docs/design/esp-idf-security-maintenance.md`. The branch stays pinned to
+  v4.4.8 for now; the actual major-version upgrade remains future work,
+  gated on that document's mandatory-upgrade triggers.
 - Per-device host-key generation on first boot (ESP-IDF hardware RNG),
   replacing this spike's build-time-injected fixed host key.
 - Persistent host key and authorized-key storage in NVS, following the
